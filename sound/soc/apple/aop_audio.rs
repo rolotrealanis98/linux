@@ -1079,14 +1079,15 @@ const HW_CFG_T6040: SndSocAopHwConfig = SndSocAopHwConfig {
 enum AopVariant {
     /// The PDM microphones behind the `audio` node, with this setup.
     Pdm(SndSocAopHwConfig),
-    /// The T8140 AOP audio services.
-    T8140,
+    /// The T8140 AOP audio services, with what the SoC leaves to the AP.
+    T8140(&'static aop_t8140::HwConfig),
 }
 
 static VARIANT_T8013: AopVariant = AopVariant::Pdm(HW_CFG_T8013);
 static VARIANT_T6030: AopVariant = AopVariant::Pdm(HW_CFG_T6030);
 static VARIANT_T6040: AopVariant = AopVariant::Pdm(HW_CFG_T6040);
-static VARIANT_T8140: AopVariant = AopVariant::T8140;
+static VARIANT_T8140: AopVariant = AopVariant::T8140(&aop_t8140::HW_T8140);
+static VARIANT_T6050: AopVariant = AopVariant::T8140(&aop_t8140::HW_T6050);
 
 kernel::of_device_table!(
     OF_TABLE,
@@ -1104,6 +1105,10 @@ kernel::of_device_table!(
         (
             of::DeviceId::new(c_str!("apple,t8140-aop-audio")),
             &VARIANT_T8140
+        ),
+        (
+            of::DeviceId::new(c_str!("apple,t6050-aop-audio")),
+            &VARIANT_T6050
         ),
     ]
 );
@@ -1164,7 +1169,9 @@ impl platform::Driver for AopAudio {
             AopVariant::Pdm(hw) => AopAudio::Pdm {
                 _driver: SndSocAopDriver::probe(pdev, hw)?,
             },
-            AopVariant::T8140 => AopAudio::T8140(aop_t8140::SndSocT8140AopDriver::probe(pdev)?),
+            AopVariant::T8140(hw) => {
+                AopAudio::T8140(aop_t8140::SndSocT8140AopDriver::probe(pdev, *hw)?)
+            }
         })
     }
 

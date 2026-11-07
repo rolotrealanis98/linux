@@ -198,6 +198,34 @@ static const struct apple_key_translation magic_keyboard_2021_and_2024_fn_keys[]
 	{ }
 };
 
+/*
+ * The function row of the keyboards on Apple's host and SPI buses (the
+ * MacBooks since 2021): the Magic Keyboard 2021 row, except that F6 is
+ * Do Not Disturb (a moon), not sleep. KEY_SLEEP there made logind suspend
+ * the machine on a Do Not Disturb press.
+ */
+static const struct apple_key_translation apple_host_fn_keys[] = {
+	{ KEY_BACKSPACE, KEY_DELETE },
+	{ KEY_ENTER,	KEY_INSERT },
+	{ KEY_F1,	KEY_BRIGHTNESSDOWN, APPLE_FLAG_FKEY },
+	{ KEY_F2,	KEY_BRIGHTNESSUP,   APPLE_FLAG_FKEY },
+	{ KEY_F3,	KEY_SCALE,          APPLE_FLAG_FKEY },
+	{ KEY_F4,	KEY_SEARCH,         APPLE_FLAG_FKEY },
+	{ KEY_F5,	KEY_MICMUTE,        APPLE_FLAG_FKEY },
+	{ KEY_F6,	KEY_DO_NOT_DISTURB, APPLE_FLAG_FKEY },
+	{ KEY_F7,	KEY_PREVIOUSSONG,   APPLE_FLAG_FKEY },
+	{ KEY_F8,	KEY_PLAYPAUSE,      APPLE_FLAG_FKEY },
+	{ KEY_F9,	KEY_NEXTSONG,       APPLE_FLAG_FKEY },
+	{ KEY_F10,	KEY_MUTE,           APPLE_FLAG_FKEY },
+	{ KEY_F11,	KEY_VOLUMEDOWN,     APPLE_FLAG_FKEY },
+	{ KEY_F12,	KEY_VOLUMEUP,       APPLE_FLAG_FKEY },
+	{ KEY_UP,	KEY_PAGEUP },
+	{ KEY_DOWN,	KEY_PAGEDOWN },
+	{ KEY_LEFT,	KEY_HOME },
+	{ KEY_RIGHT,	KEY_END },
+	{ }
+};
+
 static const struct apple_key_translation macbookair_fn_keys[] = {
 	{ KEY_BACKSPACE, KEY_DELETE },
 	{ KEY_ENTER,	KEY_INSERT },
@@ -512,7 +540,7 @@ static int hidinput_apple_event(struct hid_device *hid, struct input_dev *input,
 				if (fnmode == FKEYS_IGNORE)
 					table = apple_fn_keys_minimal;
 				else
-					table = magic_keyboard_2021_and_2024_fn_keys;
+					table = apple_host_fn_keys;
 				break;
 			}
 			break;
@@ -756,6 +784,7 @@ static void apple_setup_input(struct input_dev *input)
 	apple_setup_key_translation(input, magic_keyboard_alu_fn_keys);
 	apple_setup_key_translation(input, magic_keyboard_2015_fn_keys);
 	apple_setup_key_translation(input, magic_keyboard_2021_and_2024_fn_keys);
+	apple_setup_key_translation(input, apple_host_fn_keys);
 	apple_setup_key_translation(input, macbookpro_no_esc_fn_keys);
 	apple_setup_key_translation(input, macbookpro_dedicated_esc_fn_keys);
 }

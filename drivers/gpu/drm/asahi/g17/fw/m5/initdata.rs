@@ -1466,6 +1466,47 @@ pub(crate) const COMMON26_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
     band(0x5cc, 0x628, 0x18, Evidence::ProducerChecked),
 ];
 
+/// Status config 26A428 -> 26B123 (macOS 27.2; 27.3 beta 1 has the same layout), in 26A428
+/// offsets.
+///
+/// From +0x5b4 the object holds two controller blocks, at +0x5b4 and +0x610, of 0x5c bytes
+/// each. 26B123 inserts two words into each block, an override slot at block +0x28 and its
+/// value at block +0x58, so a block grows to 0x64 bytes and everything after the second one
+/// moves by 0x10.
+///
+/// The kext zero-fills each block and copies the same eight
+/// configuration words into block +0x3c..+0x58 (26A428) and +0x40..+0x60 (26B123): 26A428
+/// 0xfffffe0008ba5da8..0xfffffe0008ba5eb8, 26B123 0xfffffe0008bb7168..0xfffffe0008bb7288. The
+/// GFX1 firmware walks the blocks with a 0x5c (26A428) and 0x64 (26B123) stride, keeps block
+/// +0x18 and reads the value at +0x3c from +0x40 (armfw1 0x2dc3c..0x2dcc0 and
+/// 0x2dd60..0x2dde4), and gains one override/value pair, block +0x28/+0x58, in its block reader
+/// (0x1f2a0 and 0x1f360). The link word, link pointer and submission history read at +0x66c
+/// and above move by 0x10 in both the kext and the firmware.
+pub(crate) const M5_26B123_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
+    band(0x000, 0x5dc, 0, Evidence::ProducerChecked),
+    band(0x5dc, 0x608, 0x4, Evidence::FirmwareProven),
+    band(0x608, 0x638, 0x8, Evidence::ProducerChecked),
+    band(0x638, 0x664, 0xc, Evidence::FirmwareProven),
+    band(
+        0x664,
+        M5_STATUS_CONFIG_SIZE,
+        0x10,
+        Evidence::ProducerChecked,
+    ),
+];
+
+/// Status-config size of 26B123 (entry 13 of its allocation size table).
+pub(crate) const M5_26B123_STATUS_CONFIG_SIZE: usize = 0x790;
+
+/// The words 26B123 has and 26A428 does not, at 26B123 offsets, with the values its kext
+/// stores. Block 0's new value is configuration word +0x12d74 (0xfffffe0008bb71a8), 5000 by
+/// default (0xfffffe0008b444f8); the G17 override only changes it for configuration variant
+/// 0x1a (0xfffffe0008bd7474), and the 26A428 J714 policy words show variant 0x18. Block 1's
+/// new value is word +0x12da0 (0xfffffe0008bb726c), 0 by default (0xfffffe0008b44524) and
+/// never overridden. Both override slots are zero-filled.
+pub(crate) const M5_26B123_STATUS_CONFIG_INSERTED: &[(usize, u32)] =
+    &[(0x5dc, 0), (0x60c, 5000), (0x640, 0), (0x670, 0)];
+
 fn write_relocated_words(
     words: &[(usize, u32)],
     source_base: usize,
@@ -2007,6 +2048,50 @@ pub(crate) const M5_RECOVERY_SLOT_MASK: usize = 0x4ab8;
 pub(crate) const M5_STATUS_CONFIG_LINK_WORD: usize = 0x774;
 
 pub(crate) const M5_STATUS_CONFIG_LINK_PTR: usize = 0x778;
+
+/// Submission-history period and slot count (two u64), its generation word and its per-slot
+/// bytes in the status config, at 26A428 offsets.
+pub(crate) const M5_STATUS_CONFIG_HISTORY: usize = 0x73c;
+pub(crate) const M5_STATUS_CONFIG_HISTORY_GENERATION: usize = 0x74c;
+pub(crate) const M5_STATUS_CONFIG_HISTORY_SLOTS: usize = 0x750;
+
+/// Where one firmware build keeps the status-config fields the driver knows by their 26A428
+/// offsets.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) struct M5StatusConfigMap {
+    /// Allocation size (entry 13 of the build's allocation size table).
+    pub(crate) size: usize,
+    /// 26A428 offset -> this build's offset; empty for 26A428 itself.
+    pub(crate) bands: &'static [LayoutBand],
+    /// Words this build has and 26A428 does not, at this build's offsets.
+    pub(crate) inserted: &'static [(usize, u32)],
+}
+
+impl M5StatusConfigMap {
+    /// This build's offset of the 26A428 status-config offset `offset`.
+    pub(crate) const fn relocate(&self, offset: usize) -> Option<usize> {
+        if !self.bands.is_empty() {
+            return relocate_by_bands(self.bands, offset);
+        }
+        if offset < self.size {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+}
+
+pub(crate) const M5_26A428_STATUS_CONFIG: M5StatusConfigMap = M5StatusConfigMap {
+    size: M5_STATUS_CONFIG_SIZE,
+    bands: &[],
+    inserted: &[],
+};
+
+pub(crate) const M5_26B123_STATUS_CONFIG: M5StatusConfigMap = M5StatusConfigMap {
+    size: M5_26B123_STATUS_CONFIG_SIZE,
+    bands: M5_26B123_STATUS_CONFIG_BANDS,
+    inserted: M5_26B123_STATUS_CONFIG_INSERTED,
+};
 
 pub(crate) const M5_HW_DATA_INSERT: usize = 0x267c;
 
@@ -2956,23 +3041,90 @@ pub(crate) fn encode_m5_primary_status_b(
     if out.len() != layout.status_b_span() {
         return Err(InitdataError::BufferSize);
     }
+    encode_m5_primary_status_b_for(
+        &M5_26A428_STATUS_CONFIG,
+        layout.status_config_in_status_b(),
+        fwctl_state,
+        fwctl_ring,
+        status_b,
+        out,
+    )
+}
+
+/// Encodes the primary status-B span (`out`, from status B to the primary status A) of a build
+/// whose status config sits at `config` in the span and is laid out as `map` says.
+pub(crate) fn encode_m5_primary_status_b_for(
+    map: &M5StatusConfigMap,
+    config: usize,
+    fwctl_state: u64,
+    fwctl_ring: u64,
+    status_b: u64,
+    out: &mut [u8],
+) -> Result<(), InitdataError> {
+    let end = config
+        .checked_add(map.size)
+        .ok_or(InitdataError::BufferSize)?;
+    if end > out.len() {
+        return Err(InitdataError::BufferSize);
+    }
+    let link_word = map
+        .relocate(M5_STATUS_CONFIG_LINK_WORD)
+        .ok_or(InitdataError::BufferSize)?;
+    let link_ptr = map
+        .relocate(M5_STATUS_CONFIG_LINK_PTR)
+        .ok_or(InitdataError::BufferSize)?;
     required_address(fwctl_state)?;
     required_address(fwctl_ring)?;
     required_address(status_b)?;
-    let config = layout.status_config_in_status_b();
     out.fill(0);
     encode_status_block(&mut out[..STATUS_BLOCK_SIZE])?;
     put_u64(out, COMMON26_STATUS_B_FWCTL_STATE, fwctl_state);
     put_u64(out, COMMON26_STATUS_B_FWCTL_RING, fwctl_ring);
     put_u32(out, COMMON26_STATUS_B_CONFIG_HEADER, 1);
     put_u32(out, COMMON26_STATUS_B_LINK_WORD, 0);
-    put_u64(out, COMMON26_STATUS_B_LINK_PTR,
-            status_b + (config + M5_STATUS_CONFIG_LINK_WORD) as u64);
-    write_relocated_words(M5_25G76_STATUS_CONFIG_WORDS, 0, COMMON26_STATUS_CONFIG_BANDS,
-                          &mut out[config..config + layout.status_config_size()])?;
-    put_u32(out, config + M5_STATUS_CONFIG_LINK_WORD, 1);
-    put_u64(out, config + M5_STATUS_CONFIG_LINK_PTR,
-            status_b + COMMON26_STATUS_B_LINK_WORD as u64);
+    put_u64(
+        out,
+        COMMON26_STATUS_B_LINK_PTR,
+        status_b + (config + link_word) as u64,
+    );
+    write_m5_status_config_words(map, &mut out[config..end])?;
+    put_u32(out, config + link_word, 1);
+    put_u64(
+        out,
+        config + link_ptr,
+        status_b + COMMON26_STATUS_B_LINK_WORD as u64,
+    );
+    Ok(())
+}
+
+/// Writes the 25G76 status-config words through the 26A428 bands and then `map`, followed by
+/// the words the build inserted. For 26A428 this is
+/// `write_relocated_words(M5_25G76_STATUS_CONFIG_WORDS, 0, COMMON26_STATUS_CONFIG_BANDS, out)`.
+fn write_m5_status_config_words(
+    map: &M5StatusConfigMap,
+    out: &mut [u8],
+) -> Result<(), InitdataError> {
+    if out.len() != map.size {
+        return Err(InitdataError::BufferSize);
+    }
+    for &(offset, value) in M5_25G76_STATUS_CONFIG_WORDS {
+        for (index, byte) in value.to_le_bytes().into_iter().enumerate() {
+            if byte == 0 {
+                continue;
+            }
+            let target = relocate_by_bands(COMMON26_STATUS_CONFIG_BANDS, offset + index)
+                .and_then(|source| map.relocate(source));
+            if let Some(target) = target {
+                *out.get_mut(target).ok_or(InitdataError::BufferSize)? = byte;
+            }
+        }
+    }
+    for &(offset, value) in map.inserted {
+        if offset.checked_add(4).is_none_or(|end| end > out.len()) {
+            return Err(InitdataError::BufferSize);
+        }
+        put_u32(out, offset, value);
+    }
     Ok(())
 }
 

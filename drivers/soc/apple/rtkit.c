@@ -168,6 +168,12 @@ static bool apple_rtkit_coproc_places_buffers(struct apple_rtkit *rtk)
 	return rtk->ops->flags & APPLE_RTKIT_COPROC_PLACES_BUFFERS;
 }
 
+static bool apple_rtkit_acks_placed_buffers(struct apple_rtkit *rtk)
+{
+	return apple_rtkit_coproc_places_buffers(rtk) &&
+	       !(rtk->ops->flags & APPLE_RTKIT_PLACED_BUFFERS_UNACKED);
+}
+
 static bool apple_rtkit_needs_coreanalytics(struct apple_rtkit *rtk)
 {
 	return rtk->ops->flags & APPLE_RTKIT_NEEDS_COREANALYTICS;
@@ -589,7 +595,7 @@ reply:
 					    buffer->iova);
 		}
 		apple_rtkit_send_message(rtk, ep, reply, NULL, false);
-	} else if (apple_rtkit_coproc_places_buffers(rtk) ||
+	} else if (apple_rtkit_acks_placed_buffers(rtk) ||
 		   (apple_rtkit_firmware_owns_crashlog(rtk) &&
 		    ep == APPLE_RTKIT_EP_CRASHLOG)) {
 		/* acknowledge the co-processor's own buffer with its request */

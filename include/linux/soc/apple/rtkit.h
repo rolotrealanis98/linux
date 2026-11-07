@@ -68,6 +68,13 @@ struct apple_rtkit_inherited_buffer {
 #define APPLE_RTKIT_EARLY_CRASHLOG		BIT(3)
 
 /*
+ * With APPLE_RTKIT_COPROC_PLACES_BUFFERS: set up a buffer the co-processor
+ * placed itself, but do not send its request back (the T6050 AOP takes no
+ * reply to its crashlog request).
+ */
+#define APPLE_RTKIT_PLACED_BUFFERS_UNACKED	BIT(4)
+
+/*
  * Struct to represent implementation-specific RTKit operations.
  *
  * @flags:         Combination of APPLE_RTKIT_* flags describing the

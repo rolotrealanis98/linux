@@ -8,9 +8,9 @@
  * only; that is sufficient for SPI NOR discovery and access.
  *
  * The boot NOR starts read-only. On the qualified boards (J613, J713,
- * J616s and the J700) root may opt in at runtime to bounded, verified
- * programs and 4 KiB erases inside the nvram partition; everything else
- * stays read-only. On T8140 data reads reach the whole NOR.
+ * J616s, the J700 and the J716s) root may opt in at runtime to bounded,
+ * verified programs and 4 KiB erases inside the nvram partition;
+ * everything else stays read-only. On T8140 data reads reach the whole NOR.
  */
 
 #include <linux/bitfield.h>
@@ -118,6 +118,8 @@ struct apple_qspi_board {
 #define APPLE_QSPI_JEDEC_W25Q16		{ 0xef, 0x65, 0x15 }
 #define APPLE_QSPI_JEDEC_MX_2B27	{ 0xc2, 0x2b, 0x27 }
 #define APPLE_QSPI_JEDEC_GD25UF16E	{ 0xc8, 0x83, 0x15 }
+/* GigaDevice, 1.8 V, 8 MiB: the ID macOS reports on the J716s boot NOR. */
+#define APPLE_QSPI_JEDEC_GD_8M		{ 0xc8, 0x83, 0x17 }
 
 static const struct apple_qspi_board apple_qspi_boards[] = {
 	{ "apple,t8122-qspi", "apple,j613", 0x2a1118000ULL,
@@ -150,6 +152,14 @@ static const struct apple_qspi_board apple_qspi_boards[] = {
 	{ "apple,t8140-qspi", "apple,j700", 0x385110000ULL,
 	  0x24000, 0x1d0000, APPLE_QSPI_JEDEC_W25Q16, 0x1c,
 	  APPLE_QSPI_JEDEC_GD25UF16E },
+	/*
+	 * J716s (T6050): macOS reads JEDEC ID 0xc88317 from the boot NOR and
+	 * the ADT gives the NVRAM as 12 banks of 64 KiB at 0x700000. No block
+	 * protect bit is tolerated until a boot shows which ones iBoot leaves
+	 * set and what range they cover.
+	 */
+	{ "apple,t6050-qspi", "apple,j716s", 0x505118000ULL,
+	  0x700000, 0xc0000, APPLE_QSPI_JEDEC_GD_8M, 0 },
 };
 
 static DEFINE_MUTEX(apple_qspi_policy_lock);
@@ -1273,6 +1283,7 @@ static const struct of_device_id apple_qspi_of_match[] = {
 	{ .compatible = "apple,t8122-qspi", .data = &apple_qspi_single_io },
 	{ .compatible = "apple,t8132-qspi", .data = &apple_qspi_single_io },
 	{ .compatible = "apple,t6041-qspi", .data = &apple_qspi_single_io },
+	{ .compatible = "apple,t6050-qspi", .data = &apple_qspi_t8140 },
 	{ .compatible = "apple,t8140-qspi", .data = &apple_qspi_t8140 },
 	{}
 };

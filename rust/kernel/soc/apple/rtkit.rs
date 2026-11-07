@@ -250,6 +250,13 @@ impl<T: Operations> RtKit<T> {
         ..Self::VTABLE
     };
 
+    const PLACED_UNACKED_VTABLE: bindings::apple_rtkit_ops = bindings::apple_rtkit_ops {
+        flags: Self::VTABLE.flags
+            | bindings::APPLE_RTKIT_COPROC_PLACES_BUFFERS
+            | bindings::APPLE_RTKIT_PLACED_BUFFERS_UNACKED,
+        ..Self::VTABLE
+    };
+
     const G17P_VTABLE: bindings::apple_rtkit_ops = bindings::apple_rtkit_ops {
         flags: Self::FIRMWARE_CRASHLOG_VTABLE.flags | bindings::APPLE_RTKIT_EARLY_CRASHLOG,
         ..Self::FIRMWARE_CRASHLOG_VTABLE
@@ -287,6 +294,18 @@ impl<T: Operations> RtKit<T> {
         data: T::Data,
     ) -> Result<Self> {
         Self::new_with_ops(dev, mbox_name, mbox_idx, data, &Self::FIRMWARE_CRASHLOG_VTABLE)
+    }
+
+    /// Creates a client whose co-processor places some of its buffers itself
+    /// and takes no reply to those requests (the T6050 AOP). The placed
+    /// buffers are served by [`Operations::shmem_map`].
+    pub fn new_with_placed_buffers_unacked(
+        dev: &device::Device,
+        mbox_name: Option<&'static CStr>,
+        mbox_idx: usize,
+        data: T::Data,
+    ) -> Result<Self> {
+        Self::new_with_ops(dev, mbox_name, mbox_idx, data, &Self::PLACED_UNACKED_VTABLE)
     }
 
     /// Creates a G17P/G18G client whose crash DVA belongs to the GPU UAT.

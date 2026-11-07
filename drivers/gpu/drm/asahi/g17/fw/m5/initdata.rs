@@ -1489,6 +1489,25 @@ const J716C_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
     (1470, 910, 910), (1578, 975, 975), (1620, 1020, 1020),
 ]);
 
+// J716s ADT afr-perf-states (identical to cs-perf-states). SRAM is
+// max(775, core), the rule the J714 column follows.
+const J716S_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
+    (24, 125, 775),
+    (338, 585, 775),
+    (486, 630, 775),
+    (636, 655, 775),
+    (796, 680, 775),
+    (888, 695, 775),
+    (988, 740, 775),
+    (1084, 760, 775),
+    (1182, 790, 790),
+    (1278, 840, 840),
+    (1374, 870, 870),
+    (1470, 905, 905),
+    (1578, 980, 980),
+    (1620, 1000, 1000),
+]);
+
 /// An auxiliary-domain performance state: MHz, then core and SRAM mV of each of its two voltage
 /// lanes. A one-lane board leaves the second lane 0.
 pub(crate) type M5AuxPerfState = (u32, [u32; 2], [u32; 2]);
@@ -1844,6 +1863,37 @@ pub(crate) const J716C: Board = Board {
     g17d_forms: false,
 };
 
+/// M5 Pro, 16-inch: two clusters of ten cores. Values from the J716s ADT where it has them;
+/// the rest are the M5 Pro's (J714), as the part is the same G17S.
+pub(crate) const J716S: Board = Board {
+    clusters: 2,
+    gpu_cores: 20,
+    // The M5 Pro's core type for ID variant 3; revision 4 as on J714.
+    core_revision: (0x18, 4),
+    perf_states: &J716S_GPU_PERF_STATES,
+    perf_tables: 2,
+    aux_perf_states: &J716S_AUX_PERF_STATES,
+    // The ADT's gpu-perf-base-pstate 1.
+    relative_frequency: relative_frequency(&J716S_GPU_PERF_STATES, 1),
+    // The ADT aon-ptd rows RT0g, RT1g and RT0r are J714's.
+    aon_records: &J714_AON_RECORDS,
+    // J714's windows: the ADT sgx, mcc (amcc-enable-mask 0xf), pmp0, aon-ptd and ane0 nodes
+    // place them at the same addresses.
+    register_windows: &J714_REGISTER_WINDOWS,
+    min_parameter_buffer: 0x0020_0000,
+    render_pool: (0x40_0000, 1 << 32),
+    // No controller configuration has been measured for a J716s part: the firmware keeps its
+    // own power budget, as on a J714 part whose calibration words differ.
+    calibration: None,
+    controller_defaults: None,
+    idle_standby_us: None,
+    // The ADT GPU node's active-mcc-bit-vector 0xf is the inherited mask.
+    mcc_mask: None,
+    topology_words: None,
+    fan_curve_start_mc: 84_000,
+    g17d_forms: false,
+};
+
 /// J775D's performance controllers run from P3.
 const J775D_PERF_FLOOR: usize = 3;
 
@@ -1882,6 +1932,7 @@ const _: () = {
     use super::target::min_parameter_buffer_pages;
     assert!(J714.min_parameter_buffer as u64 == min_parameter_buffer_pages(J714.clusters) << 15);
     assert!(J716C.min_parameter_buffer as u64 == min_parameter_buffer_pages(J716C.clusters) << 15);
+    assert!(J716S.min_parameter_buffer as u64 == min_parameter_buffer_pages(J716S.clusters) << 15);
     assert!(J775D.min_parameter_buffer as u64 == min_parameter_buffer_pages(J775D.clusters) << 15);
 };
 
@@ -1945,6 +1996,25 @@ pub(crate) const J714_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
     (1182, 800, 800, 800, 800), (1278, 840, 840, 840, 840),
     (1374, 880, 880, 880, 880), (1470, 925, 925, 925, 925),
     (1578, 1000, 1000, 1000, 1000), (1620, 1025, 1040, 1025, 1040),
+]);
+
+// J716s ADT sgx perf-states (table 0, then table 1 = perf-states1) and perf-states-sram /
+// perf-states-sram1, mV. The bins are this part's: the J714 table differs in every active state.
+pub(crate) const J716S_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
+    (0, 125, 125, 775, 775),
+    (338, 600, 600, 775, 775),
+    (486, 630, 630, 775, 775),
+    (636, 665, 665, 775, 775),
+    (796, 715, 715, 775, 775),
+    (888, 725, 725, 775, 775),
+    (988, 755, 755, 775, 775),
+    (1084, 780, 780, 780, 780),
+    (1182, 810, 810, 810, 810),
+    (1278, 865, 850, 865, 850),
+    (1374, 905, 875, 905, 875),
+    (1470, 950, 920, 950, 920),
+    (1578, 1025, 995, 1025, 995),
+    (1620, 1050, 1035, 1050, 1035),
 ]);
 
 /// Four-table states (MHz, four core-voltage tables, four SRAM-voltage tables), the rest 0.

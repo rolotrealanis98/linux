@@ -3,17 +3,9 @@
 //!
 //! The M5 firmware builds its HW data, performance tables and region C in its own graph
 //! ([`crate::g17::fw::m5::initdata`]), so the 26A428/25G83 graph tables of [`Config`] are empty.
-use crate::g17::{Config, CoreLayout, CrashBuffers, FirmwareProfile, FixedBuffer, Identity};
+use crate::g17::{Config, CoreLayout, CrashBuffers, FirmwareProfile, Identity};
 use crate::hw::{GpuGen, GpuVariant};
 use crate::regs::G17Id;
-
-// The coprocessors request a crash log buffer at these addresses (primary first) when they start and hand
-// its contents back when they crash; outside the canonical range of dynamic objects. They are the
-// ADT sgx gfx-data-shared-ro-base and gfx1-data-shared-ro-base (each 0x8000), so they differ per board.
-const J714_CRASH_BUFFERS: [FixedBuffer; 2] = [
-    FixedBuffer { va: 0x100_025b_4000, size: 0x8000 },
-    FixedBuffer { va: 0x100_0267_0000, size: 0x8000 },
-];
 
 /// The G17S builds the M5 Pro admits, newest first. The boot loader loads both roles' TEXT back
 /// to back into `fw-text`: the primary's 0x50000, then the secondary's 0x54000, each with its own
@@ -101,6 +93,7 @@ const M5_PRO_BUILDS: &[crate::g17::fw::variant::Build] = &[
     },
 ];
 
+/// M5 Pro: ID variant 3, GPU variant S, on bare metal.
 pub(crate) const CONFIG: Config = Config {
     chip_id: 0x6050,
     identity: Identity {
@@ -113,19 +106,26 @@ pub(crate) const CONFIG: Config = Config {
     },
     uat_ias: 42,
     uat_oas: 42,
-    // Unknown until the board has bare-metal page tables.
-    secondary_root_offset: None,
-    crash_buffers: CrashBuffers::Fixed(J714_CRASH_BUFFERS),
-    profile: FirmwareProfile::M5NoBareMetalTables,
+    // The M5 Max's and M5 Ultra's bare-metal profile: both roles publish their kernel roots,
+    // the secondary's 0x40000 into `pagetables` (the ADT gfx-shared-region holds 0x80000), and
+    // each asks for its crash log inside `fw-data`, where each role's DATA_SHARED_RO follows its
+    // DATA. The G17S firmware's privileged code, which builds and publishes those roots, is the
+    // G17C build's but for one call's displacement, in 27.0, 27.2 and 27.3 alike.
+    secondary_root_offset: Some(0x40000),
+    crash_buffers: CrashBuffers::FirmwareData,
+    profile: FirmwareProfile::M5PublishedRoots,
     pm_metrics: None,
     windows: &[],
     reserved_slots: &[],
     perf: None,
     opps: 0,
-    uat_quirks: crate::mmu::UatQuirks::DEFAULT,
+    // The M5 Ultra's UAT policy, as on the M5 Max.
+    uat_quirks: CONFIG_ULTRA.uat_quirks,
     region_c: None,
     chip: None,
-    m5: Some(&crate::g17::fw::m5::initdata::J714),
+    // The 16-inch board's tables. Both M5 Pro boards report ID variant 3, so a 14-inch one takes
+    // them too, as the 14-inch M5 Max takes J716c's.
+    m5: Some(&crate::g17::fw::m5::initdata::J716S),
     adopt_root_entries: true,
     fabric_bridge: false,
     recovery_slot_keys: None,
@@ -297,8 +297,8 @@ pub(crate) const CONFIG_ULTRA: Config = Config {
 
 // Each compute operand bank holds 6 KiB per core slot of the board.
 const _: () = {
-    use crate::g17::fw::m5::initdata::{J714, J716C, J775D};
-    assert!(CONFIG.core_layout.operand_state.bank_bytes() == J714.gpu_cores * 0x1800);
+    use crate::g17::fw::m5::initdata::{J716C, J716S, J775D};
+    assert!(CONFIG.core_layout.operand_state.bank_bytes() == J716S.gpu_cores * 0x1800);
     assert!(CONFIG_MAX.core_layout.operand_state.bank_bytes() == J716C.gpu_cores * 0x1800);
     assert!(CONFIG_ULTRA.core_layout.operand_state.bank_bytes() == J775D.gpu_cores * 0x1800);
 };

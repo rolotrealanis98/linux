@@ -37,7 +37,7 @@ const M5_PRO_BUILDS: &[crate::g17::fw::variant::Build] = &[
                 0x66, 0x76, 0x36, 0x00,
             ],
         }],
-        variant: &crate::g17::fw::variant::V26B123_M5,
+        variant: &crate::g17::fw::variant::V26C5035_M5,
     },
     crate::g17::fw::variant::Build {
         os_version: [27, 2, 0],

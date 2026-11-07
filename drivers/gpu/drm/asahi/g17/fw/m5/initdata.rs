@@ -38,6 +38,11 @@ pub(crate) enum RootProfile {
     /// The M5 graph of the macOS 27.2 firmware (26B123, RTKit pac-3514.41.1): the 26A428 graph
     /// with a larger power policy and status config ([`ABI_ALLOCATION_SIZES_26B123_M5`]).
     J714G17S26B123,
+
+    /// The M5 graph of the macOS 27.3 beta 1 firmware (26C5035r, RTKit pac-3514.60.8): the
+    /// 26B123 graph with one more HW data word ([`M5_26C5035_HW_DATA_BANDS`]). The firmware
+    /// takes the same interface version word as 26B123's, so only its identity tells them apart.
+    J714G17S26C5035,
 }
 
 impl RootProfile {
@@ -47,6 +52,7 @@ impl RootProfile {
         match layouts {
             M5Layouts::V26A428 => Self::J714G17S26A428,
             M5Layouts::V26B123 => Self::J714G17S26B123,
+            M5Layouts::V26C5035 => Self::J714G17S26C5035,
         }
     }
 
@@ -55,6 +61,7 @@ impl RootProfile {
         match self {
             Self::J714G17S26A428 => Some(&M5_LAYOUT_26A428),
             Self::J714G17S26B123 => Some(&M5_LAYOUT_26B123),
+            Self::J714G17S26C5035 => Some(&M5_LAYOUT_26C5035),
             Self::J700G17P | Self::J813G17G25G76 | Self::J873G18G26A428 => None,
         }
     }
@@ -65,14 +72,14 @@ impl RootProfile {
             Self::J813G17G25G76 => 0x0c8a_a322_039e_04c0,
             Self::J873G18G26A428 => COMMON26_INITDATA_VERSION_WORD,
             Self::J714G17S26A428 => M5_INITDATA_VERSION_WORD,
-            Self::J714G17S26B123 => M5_26B123_INITDATA_VERSION_WORD,
+            Self::J714G17S26B123 | Self::J714G17S26C5035 => M5_26B123_INITDATA_VERSION_WORD,
         }
     }
 
     pub(crate) const fn root_size(self, role: InstanceRole) -> usize {
         match self {
             Self::J873G18G26A428 => COMMON26_ROOT_SIZE,
-            Self::J714G17S26A428 | Self::J714G17S26B123 => M5_ROOT_SIZE,
+            Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035 => M5_ROOT_SIZE,
             Self::J700G17P | Self::J813G17G25G76 => root_size(role),
         }
     }
@@ -85,12 +92,14 @@ impl RootProfile {
             (Self::J873G18G26A428, InstanceRole::Secondary) => {
                 COMMON26_CONTROL_OPENING_OPCODE_SECONDARY
             }
-            (Self::J714G17S26A428 | Self::J714G17S26B123, InstanceRole::Primary) => {
-                M5_CONTROL_OPENING_OPCODE_PRIMARY
-            }
-            (Self::J714G17S26A428 | Self::J714G17S26B123, InstanceRole::Secondary) => {
-                M5_CONTROL_OPENING_OPCODE_SECONDARY
-            }
+            (
+                Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035,
+                InstanceRole::Primary,
+            ) => M5_CONTROL_OPENING_OPCODE_PRIMARY,
+            (
+                Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035,
+                InstanceRole::Secondary,
+            ) => M5_CONTROL_OPENING_OPCODE_SECONDARY,
             (_, InstanceRole::Primary) => CONTROL_OPENING_OPCODE_PRIMARY,
             (_, InstanceRole::Secondary) => CONTROL_OPENING_OPCODE_SECONDARY,
         }
@@ -98,7 +107,10 @@ impl RootProfile {
 
     pub(crate) const fn control_register_opcode(self) -> Option<u32> {
         match self {
-            Self::J873G18G26A428 | Self::J714G17S26A428 | Self::J714G17S26B123 => None,
+            Self::J873G18G26A428
+            | Self::J714G17S26A428
+            | Self::J714G17S26B123
+            | Self::J714G17S26C5035 => None,
             Self::J700G17P | Self::J813G17G25G76 => Some(CONTROL_OPENING_PRIMARY_REGISTER_OPCODE),
         }
     }
@@ -898,7 +910,8 @@ pub(crate) fn encode_main_config_for_profile(
 
                 RootProfile::J873G18G26A428
                 | RootProfile::J714G17S26A428
-                | RootProfile::J714G17S26B123 => COMMON26_MAIN_SECONDARY_KIND,
+                | RootProfile::J714G17S26B123
+                | RootProfile::J714G17S26C5035 => COMMON26_MAIN_SECONDARY_KIND,
             });
             if let Some(layout) = profile.m5_layout() {
 
@@ -1736,6 +1749,40 @@ const _: () = {
     }
 };
 
+/// The HW data of the 27.3 beta 1 firmware (26C5035r) is 26A428's with one u32 inserted at
+/// 0x2720: every later field moves by 4, the four zero bytes past 0x284c fall off the end. Its
+/// kext's HW data builder stores at 0x2724, 0x272c, 0x2730, ..., the kick-shared pointer at
+/// 0x27e0, ..., 0x284a where the 26A428 and 26B123 kexts store at 0x2720, 0x2728, 0x272c, ...,
+/// 0x27dc, ..., 0x2846; its 314 stores below 0x2720 are theirs.
+pub(crate) const M5_26C5035_HW_DATA_BANDS: &[LayoutBand] = &[
+    band(0x0000, 0x2720, 0, Evidence::ProducerChecked),
+    band(0x2720, 0x284c, 4, Evidence::ProducerChecked),
+];
+
+/// The 26C5035r HW data word bounding how long the firmware waits for the GPU to reach a forced
+/// idle after a sleep request, ms; 0 disables the wait. The G17S firmware loads it from the HW
+/// data (`ldr w22, [x8, #0x2720]` at TEXT 0x29e18), compares it x 24000 ticks with the time
+/// since the request and reports "GPU did not reach forced idle within %ums of the sleep
+/// request" past it. The 26B123 firmware has neither the word nor the message.
+pub(crate) const M5_26C5035_HW_FORCED_IDLE_TIMEOUT: usize = 0x2720;
+
+/// The kext's GPU timeout, s: IOGPU's `waitForGPUTimeoutSeconds` (word 0x284 of the
+/// accelerator), which IOGPUFamily's configuration defaults set to 5 (26C5035r 0xfffffe000aa85ba0
+/// stores the q-word at `__const` 0xfffffe0007a71250 to +0x278; its last word is 5). Neither
+/// AGXG17X nor IOGPUFamily's boot-argument parsing stores to it.
+pub(crate) const M5_GPU_TIMEOUT_SECONDS: u32 = 5;
+
+/// The forced-idle timeout as the 26C5035r kext derives it from its GPU timeout: s x 1000,
+/// saturating to u32::MAX (AGXG17X 0xfffffe0008bd0644..0xfffffe0008bd0660: `mul` by 1000, `cmp`
+/// with 0x418938, `csinv`).
+pub(crate) const fn m5_forced_idle_timeout_ms(seconds: u32) -> u32 {
+    if seconds < 0x0041_8938 {
+        seconds * 1000
+    } else {
+        u32::MAX
+    }
+}
+
 /// The InitData layout of one M5 firmware build: its allocation size table, the packed clusters
 /// derived from it, and how its HW data differs from the 26A428 encoding.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -1843,13 +1890,26 @@ pub(crate) const M5_LAYOUT_26A428: M5Layout =
 pub(crate) const M5_LAYOUT_26B123: M5Layout =
     M5Layout::new(ABI_ALLOCATION_SIZES_26B123_M5, &[], &[]);
 
+/// The 27.3 beta 1 (26C5035r) M5 layout.
+pub(crate) const M5_LAYOUT_26C5035: M5Layout = M5Layout::new(
+    ABI_ALLOCATION_SIZES_26B123_M5,
+    M5_26C5035_HW_DATA_BANDS,
+    &[(
+        M5_26C5035_HW_FORCED_IDLE_TIMEOUT,
+        m5_forced_idle_timeout_ms(M5_GPU_TIMEOUT_SECONDS),
+    )],
+);
+
 const _: () = {
     // The bundle and the private cluster keep the sizes of their fixed windows.
     assert!(M5_LAYOUT_26B123.shared.total == M5_LAYOUT_26A428.shared.total);
     assert!(M5_LAYOUT_26B123.private.total == M5_LAYOUT_26A428.private.total);
-    // The 26B123 HW data is 26A428's.
+    // The kick-shared pointer and the last field the 26C5035r kext writes.
     let kick = M5_KICK_SHARED_POINTER;
-    assert!(matches!(M5_LAYOUT_26B123.hw_data_offset(kick), Some(0x27dc)));
+    assert!(matches!(M5_LAYOUT_26A428.hw_data_offset(kick), Some(0x27dc)));
+    assert!(matches!(M5_LAYOUT_26C5035.hw_data_offset(kick), Some(0x27e0)));
+    assert!(matches!(M5_LAYOUT_26C5035.hw_data_offset(0x2846), Some(0x284a)));
+    assert!(matches!(M5_LAYOUT_26C5035.hw_data_offset(0x271c), Some(0x271c)));
 };
 
 pub(crate) const M5_SHARED_LAYOUT: SharedClusterLayout = M5_LAYOUT_26A428.shared;

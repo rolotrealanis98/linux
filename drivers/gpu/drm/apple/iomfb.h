@@ -57,6 +57,13 @@ enum dcpep_type {
  */
 enum iomfb_parameter {
 	IOMFBPARAM_ADAPTIVE_SYNC = 14,
+	/*
+	 * Firmware 27 (27.0, 27.2 and 27.3 alike) numbers adaptive sync 15.
+	 * It takes up to three values: the minimum rate and the media target
+	 * rate in 16.16 Hz, then a fractional-rate flag.  The firmware drops
+	 * the last two when the target is above 120 Hz or the flag above 1.
+	 */
+	IOMFBPARAM_ADAPTIVE_SYNC_V27 = 15,
 };
 
 #define IOMFB_MESSAGE_TYPE	GENMASK_ULL( 3,  0)

@@ -2444,7 +2444,7 @@ static void dcp_on_set_parameter(struct apple_dcp *dcp, void *out, void *cookie)
 	struct dcp_set_parameter_dcp param = {
 		.param =
 #if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
-		15,
+		IOMFBPARAM_ADAPTIVE_SYNC_V27,
 #else
 		IOMFBPARAM_ADAPTIVE_SYNC,
 #endif
@@ -4012,7 +4012,7 @@ static void dcp_set_adaptive_sync(struct apple_dcp *dcp, u32 min_vrr,
 	struct dcp_set_parameter_dcp param = {
 		.param =
 #if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
-		15,
+		IOMFBPARAM_ADAPTIVE_SYNC_V27,
 #else
 		IOMFBPARAM_ADAPTIVE_SYNC,
 #endif

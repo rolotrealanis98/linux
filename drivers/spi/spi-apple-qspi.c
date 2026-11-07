@@ -746,6 +746,9 @@ static int apple_qspi_nvram_modify(struct spi_mem *mem, const struct spi_mem_op 
 		goto out;
 	if (memcmp(id, qspi->jedec, sizeof(id)) &&
 	    (!qspi->jedec_alt[0] || memcmp(id, qspi->jedec_alt, sizeof(id)))) {
+		dev_warn_ratelimited(&mem->spi->dev,
+			"NVRAM denied: flash ID %02x%02x%02x is not the qualified part\n",
+			id[0], id[1], id[2]);
 		ret = -ENODEV;
 		goto out;
 	}
@@ -755,6 +758,10 @@ static int apple_qspi_nvram_modify(struct spi_mem *mem, const struct spi_mem_op 
 	/* No unlocking. Conservatively refuse BP/CMP/WPS, BUSY/WEL or suspend. */
 	if (!apple_qspi_part_status_allows_write(id[0], before[0], before[1],
 						 before[2], qspi->bp_ok)) {
+		dev_warn_ratelimited(&mem->spi->dev,
+			"NVRAM denied: flash %02x%02x%02x status %02x %02x %02x refuses writes (bp_ok %02x)\n",
+			id[0], id[1], id[2], before[0], before[1], before[2],
+			qspi->bp_ok);
 		ret = -EACCES;
 		goto out;
 	}

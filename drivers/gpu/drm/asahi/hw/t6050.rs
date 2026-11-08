@@ -142,6 +142,21 @@ pub(crate) const CONFIG: Config = Config {
     },
 };
 
+/// Owner J714s voltage bins; selected only for the J714s root compatible.
+pub(crate) const CONFIG_J714S: Config = Config {
+    m5: Some(&crate::g17::fw::m5::initdata::J714S),
+    ..CONFIG
+};
+
+/// Require actual nonzero fuse masks before starting firmware on the owner J714s.
+/// The ID describes two clusters of ten physical slots; enabled cores come from the masks.
+pub(crate) fn j714s_core_masks_valid(id: &G17Id) -> bool {
+    id.family == 0xb && id.variant == 3 && id.num_dies == 1
+        && id.num_clusters == 2 && id.num_cores == 10 && id.core_masks.len() == 2
+        && id.core_masks.iter().all(|mask| *mask & !0x3ff == 0)
+        && id.core_masks.iter().any(|mask| *mask != 0)
+}
+
 /// M5 Max: ID variant 4, GPU variant C, HAL generation 300 like the M5 Pro.
 pub(crate) const CONFIG_MAX: Config = Config {
     chip_id: 0x6050,

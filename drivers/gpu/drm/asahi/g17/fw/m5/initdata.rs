@@ -1609,6 +1609,26 @@ const J716S_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
     (1620, 1000, 1000),
 ]);
 
+// J714s ADT metadata from one tested unit, macOS 27.3 beta 1 (26C5035r).
+// These voltage bins are not a claim about every J714s unit.
+// Auxiliary SRAM follows the table's 775000 uV floor and published max(floor, core) rule.
+pub(crate) const J714S_AUX_PERF_STATES: [M5AuxPerfState; 14] = one_lane([
+    (24, 125, 775),
+    (338, 600, 775),
+    (486, 635, 775),
+    (636, 640, 775),
+    (796, 680, 775),
+    (888, 700, 775),
+    (988, 740, 775),
+    (1084, 765, 775),
+    (1182, 790, 790),
+    (1278, 830, 830),
+    (1374, 860, 860),
+    (1470, 895, 895),
+    (1578, 955, 955),
+    (1620, 985, 985),
+]);
+
 /// An auxiliary-domain performance state: MHz, then core and SRAM mV of each of its two voltage
 /// lanes. A one-lane board leaves the second lane 0.
 pub(crate) type M5AuxPerfState = (u32, [u32; 2], [u32; 2]);
@@ -2262,6 +2282,15 @@ pub(crate) const J716S: Board = Board {
     g17d_forms: false,
 };
 
+/// Owner J714s: its measured voltage tables, with the existing G17S bare-metal profile.
+/// All other fields retain J716S's existing assumptions, not new J714s measurements.
+pub(crate) const J714S: Board = Board {
+    perf_states: &J714S_GPU_PERF_STATES,
+    aux_perf_states: &J714S_AUX_PERF_STATES,
+    relative_frequency: relative_frequency(&J714S_GPU_PERF_STATES, 1),
+    ..J716S
+};
+
 /// J775D's performance controllers run from P3.
 const J775D_PERF_FLOOR: usize = 3;
 
@@ -2612,6 +2641,25 @@ pub(crate) const J716S_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
     (1470, 950, 920, 950, 920),
     (1578, 1025, 995, 1025, 995),
     (1620, 1050, 1035, 1050, 1035),
+]);
+
+// J714s ADT metadata from one tested unit, macOS 27.3 beta 1 (26C5035r).
+// These voltage bins are not a claim about every J714s unit.
+pub(crate) const J714S_GPU_PERF_STATES: [M5PerfState; 14] = two_tables([
+    (0, 125, 125, 775, 775),
+    (338, 590, 590, 775, 775),
+    (486, 620, 620, 775, 775),
+    (636, 655, 655, 775, 775),
+    (796, 705, 705, 775, 775),
+    (888, 730, 730, 775, 775),
+    (988, 760, 760, 775, 775),
+    (1084, 785, 785, 785, 785),
+    (1182, 800, 800, 800, 800),
+    (1278, 840, 840, 840, 840),
+    (1374, 880, 865, 880, 865),
+    (1470, 925, 910, 925, 910),
+    (1578, 1000, 985, 1000, 985),
+    (1620, 1025, 1010, 1025, 1010),
 ]);
 
 /// Four-table states (MHz, four core-voltage tables, four SRAM-voltage tables), the rest 0.

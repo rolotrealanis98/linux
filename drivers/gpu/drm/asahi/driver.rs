@@ -3,7 +3,7 @@
 //! Top-level GPU driver implementation.
 
 use crate::module_parameters;
-use kernel::bindings;
+use kernel::{bindings, c_str};
 use kernel::{
     device::{
         Core,
@@ -414,6 +414,27 @@ impl AsahiPlatformDriver {
                 id.variant, id.num_dies);
             ENODEV
         })?;
+        // Same root-compatible lookup as the existing M3 board helper. GPU ID alone
+        // cannot distinguish J714s from J716s, whose voltage bins differ.
+        let is_j714s = if let Some(root) = of::root() {
+            root.get_property::<KVec<u8>>(c_str!("compatible"))?
+                .split(|b| *b == 0)
+                .any(|s| s == b"apple,j714s")
+        } else {
+            false
+        };
+        let cfg = if is_j714s {
+            if !hw::t6050::j714s_core_masks_valid(&id) {
+                dev_err!(
+                    pdev.as_ref(),
+                    "J714s GPU core geometry or fuse masks invalid; refusing firmware init\n"
+                );
+                return Err(ENODEV);
+            }
+            &hw::t6050::CONFIG_J714S
+        } else {
+            cfg
+        };
         Self::probe_g17(pdev, res, cfg)
     }
 

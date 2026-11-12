@@ -70,18 +70,26 @@ impl InitData {
         // 26A428 one (0x6d0 bytes) has no such table.
         if self.graph.is_common26() { return Ok(()); }
         let private = self.object(self.cluster)?;
-        let base = m::M5_PRIVATE_LAYOUT.status_config;
+        // The driver knows the history by its 26A428 offsets; the firmware build's status
+        // config has it at its own.
+        let base = self.graph.private.status_config;
+        let field = |offset| {
+            self.graph.status_config.relocate(offset).map(|at| base + at).ok_or(EINVAL)
+        };
+        let history = field(m::M5_STATUS_CONFIG_HISTORY)?;
+        let generation_at = field(m::M5_STATUS_CONFIG_HISTORY_GENERATION)?;
+        let slots = field(m::M5_STATUS_CONFIG_HISTORY_SLOTS)?;
         for _ in 0..64 {
-            let generation = private.word(base + 0x74c)?.load(Ordering::Acquire);
+            let generation = private.word(generation_at)?.load(Ordering::Acquire);
             if generation & 1 != 0 { core::hint::spin_loop(); continue; }
             // The firmware moves the generation around every change of the geometry: while it
             // reads as it did, the geometry read under it stands, without four more loads.
             let (period, count) = match self.history_geometry.get() {
                 Some((seen, period, count)) if seen == generation => (period, count),
                 _ => {
-                    let config = private.read_words::<4>(base + 0x73c)?;
+                    let config = private.read_words::<4>(history)?;
                     fence(Ordering::Acquire);
-                    if generation != private.word(base + 0x74c)?.load(Ordering::Acquire) {
+                    if generation != private.word(generation_at)?.load(Ordering::Acquire) {
                         core::hint::spin_loop(); continue;
                     }
                     let period = u64::from(config[0]) | u64::from(config[1]) << 32;
@@ -96,7 +104,7 @@ impl InitData {
             // One slot per 25000 ticks of the period.
             let index = (ticks % period) / 25_000;
             if index >= count { return Err(ERANGE); }
-            let byte = private.pointer(base + 0x750 + index as usize, 1)?;
+            let byte = private.pointer(slots + index as usize, 1)?;
             // SAFETY: retained, bounds-checked WC byte, written as a single byte
             // after reading the even, stable generation, as the firmware expects.
             unsafe {
@@ -210,7 +218,7 @@ impl InitData {
                 .map_err(|_| EINVAL)?;
         } else {
             m::encode_m5_region_c(self.object_mut(self.region_c)?.bytes_mut()).map_err(|_| EINVAL)?;
-            m::encode_m5_private_cluster(PRIVATE, FWCTL,
+            m::encode_m5_private_cluster(board.graph, PRIVATE, FWCTL,
                 &mut self.object_mut(self.cluster)?.bytes_mut()[..private.total]).map_err(|_| EINVAL)?;
         }
         let windows = board.register_windows();
@@ -247,13 +255,22 @@ impl InitData {
         m::set_m5_enabled_cores(board,
             &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE], enabled_cores)
             .map_err(|_| EINVAL)?;
+        let pause_us = crate::module_parameters::m5_pause_timeout_us.value();
+        if pause_us != 0 {
+            let at = m::hw_field(board, m::M5_HW_PAUSE_TIMEOUT_US).ok_or(EINVAL)?;
+            self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE]
+                .get_mut(at..at + 4).ok_or(EINVAL)?
+                .copy_from_slice(&pause_us.to_le_bytes());
+            pr_info!("G17: firmware scheduling pause timeout {} us (m5_pause_timeout_us)\n", pause_us);
+        }
         let bindings = m::M5PolicyBindings {
             state: PRIVATE + private.policy_state as u64, aon_ptd: aon_va, boot_timestamp: 0,
         };
         if common26 {
             m::encode_common26_bundle_policy(board, bindings, self.object_mut(self.bundle)?.bytes_mut())
         } else {
-            m::encode_m5_bundle_policy(bindings, self.object_mut(self.bundle)?.bytes_mut())
+            m::encode_m5_bundle_policy(board.graph, bindings,
+                self.object_mut(self.bundle)?.bytes_mut())
         }.map_err(|_| EINVAL)?;
         // The controller configuration applies where the part's leakage calibration matches the
         // one it was made for, or on a board whose configuration holds for every part.
@@ -266,12 +283,30 @@ impl InitData {
                 calibration.as_ref().is_ok_and(|words| words.as_slice() == expected)
             }
         };
-        if let Some(defaults) = board.controller_defaults.filter(|_| calibrated) {
+        let controller_defaults = board.controller_defaults.filter(|_| calibrated);
+        if let Some(defaults) = controller_defaults {
             defaults(self.object_mut(self.bundle)?.bytes_mut()).map_err(|_| EINVAL)?;
             let maximum = self.object(self.bundle)?.word(shared.policy + m::M5_POLICY_MAXIMUM_POWER)?
                 .load(Ordering::Relaxed);
             m::set_m5_region_maximum_power(self.object_mut(self.region_c)?.bytes_mut(), maximum)
                 .map_err(|_| EINVAL)?;
+        }
+        // The M5 Pro policy encoders write the 26A428 layout; a build with another one gets it
+        // laid out in place, within its own allocation. (The common 26A428 policy has its own
+        // encoder.)
+        if !common26 {
+            let policy = board.graph.policy;
+            let policy_end = shared.policy.checked_add(policy.size).ok_or(EINVAL)?;
+            if policy_end > shared.block_68 {
+                return Err(EINVAL);
+            }
+            m::relayout_m5_policy(
+                policy,
+                board,
+                controller_defaults.is_some(),
+                &mut self.object_mut(self.bundle)?.bytes_mut()[shared.policy..policy_end],
+            )
+            .map_err(|_| EINVAL)?;
         }
         if let Some(microseconds) = board.idle_standby_us {
             m::set_m5_region_idle_standby(self.object_mut(self.region_c)?.bytes_mut(), microseconds)

@@ -41,9 +41,12 @@ pub(crate) enum InitGraph {
 pub(crate) enum M5Layouts {
     /// The 26A428 graph: version word 0x0c8e_0339_8728_04c0 and its allocation sizes.
     V26A428,
-    /// The 26B123 graph, which 27.3 (26C5035r) shares: version word 0x0c8e_4339_8728_04c0, a
-    /// larger power policy (0x12728) and status config (0x790), and a HW data word at 0x2720.
+    /// The 27.2 (26B123) graph: version word 0x0c8e_4339_8728_04c0, a larger power policy
+    /// (0x12728) and status config (0x790), the 26A428 HW data.
     V26B123,
+    /// The 27.3 beta 1 (26C5035r) graph: 26B123's, the same version word included, with a HW
+    /// data word inserted at 0x2720. Only the firmware's identity tells it from 26B123.
+    V26C5035,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -197,10 +200,16 @@ pub(crate) const V26A428_M5: Variant = Variant {
     ..V26A428
 };
 
-/// The M5 firmware from 27.2 (26B123) on, 27.3 (26C5035r) included: the 26A428 M5 protocol with
-/// the 26B123 InitData layouts.
+/// The 27.2 M5 firmware (26B123): the 26A428 M5 protocol with the 26B123 InitData layouts.
 pub(crate) const V26B123_M5: Variant = Variant {
     m5_layouts: Some(M5Layouts::V26B123),
+    ..V26A428_M5
+};
+
+/// The 27.3 beta 1 M5 firmware (26C5035r): the 26A428 M5 protocol with the 26C5035r InitData
+/// layouts.
+pub(crate) const V26C5035_M5: Variant = Variant {
+    m5_layouts: Some(M5Layouts::V26C5035),
     ..V26A428_M5
 };
 

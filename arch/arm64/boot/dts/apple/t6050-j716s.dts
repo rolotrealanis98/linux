@@ -15,6 +15,7 @@
 
 /dts-v1/;
 
+#define T6050_J716S
 #include <dt-bindings/leds/common.h>
 #include "t6050-max.dtsi"
 
@@ -30,6 +31,10 @@
 		bluetooth0 = &n1_beta;
 		/* The loader fills the keyboard layout from the ADT's keyboard node */
 		keyboard = &keyboard;
+		/* the boot loader reserves the SEP firmware and adds its manifests through this alias */
+		sep = &sep;
+		/* The loader finds the boot NOR's NVRAM partition through this alias */
+		nvram = &nvram;
 	};
 
 	chosen {
@@ -41,6 +46,8 @@
 			compatible = "apple,simple-framebuffer", "simple-framebuffer";
 			reg = <0 0 0 0>; /* To be filled by the loader */
 			/* Format properties will be added by the loader */
+			/* simpledrm reports an eDP connector for the built-in panel */
+			apple,internal-panel;
 			status = "disabled";
 		};
 	};
@@ -65,20 +72,11 @@
 	status = "okay";
 };
 
-/* A block t6050-die0.dtsi does not describe yet: the third HPM bus */
-&die0 {
-	/*
-	 * ADT nub-spmi-a1, the right-hand port's HPM bus (hpm2). Polled like a0:
-	 * the generation 4 driver takes no interrupt. pmgr NUB_SPMI_A1 is
-	 * critical, as NUB_SPMI_A0, so no power-domains.
-	 */
-	nub_spmi_a1: spmi@28a1a8000 {
-		compatible = "apple,t6050-spmi", "apple,t8142-spmi";
-		reg = <0x2 0x8a1a8000 0x0 0x4000>;
-		#address-cells = <2>;
-		#size-cells = <0>;
-	};
-};
+/*
+ * The SoC's inventory (t6050-peripherals.dtsi). Everything it declares is disabled; what
+ * follows enables and completes what this board uses, so it comes after the inventory.
+ */
+#include "t6050-peripherals.dtsi"
 
 /*
  * PCIe port 0: the N1 (Wi-Fi and Bluetooth). Port 1 is the SD reader, not yet
@@ -212,6 +210,7 @@
 		label = "apcie_gp";
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 	};
 
@@ -221,6 +220,7 @@
 		label = "fab6_soc";
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 	};
 
@@ -231,6 +231,7 @@
 		power-domains = <&ps_apcie_gp>, <&ps_fab6_soc>;
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 		apple,no-auto-pm;
 	};
@@ -242,6 +243,7 @@
 		power-domains = <&ps_apcie_sys_gp>;
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 		apple,no-auto-pm;
 	};
@@ -253,6 +255,7 @@
 		power-domains = <&ps_apcie_phy_sw>;
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 	};
 
@@ -263,6 +266,7 @@
 		power-domains = <&ps_aphy_gp_aus5_a>;
 		#power-domain-cells = <0>;
 		#reset-cells = <0>;
+		status = "okay";
 		apple,always-on;
 		apple,no-auto-pm;
 	};
@@ -356,110 +360,39 @@
 };
 
 /*
- * Right port (ATC2), the same chain: the SN201202x hpm2 on nub_spmi_a1,
- * polled, and the connector graph into usb_drd2 and the combo PHY. Only the
- * USB route: dcpext0's DisplayPort route through ATC2 (atc2_xbar, the PHY's
- * DP lane, the connector's DP port) stays off. The addresses, interrupts and
- * power states in t6050-die0.dtsi match this board's ADT (atc-phy2,
- * acio-phy-cpu2, usb-drd2, dart-usb2, pmgr ATC2_*). The boot loader puts
- * hpm2 in S0, parks the PIPE and fills the PHY's tunables.
+ * Right port (ATC2): hpm2 on nub-spmi-a1, with USB and the USB4/Thunderbolt router, as on
+ * the J714s. The inventory's nub-spmi-a1 has the generation 4 bus's three register windows
+ * and IRQ (ADT nub-spmi-a1); the driver polls it and refuses an interrupt, so it takes the
+ * first window only. The boot loader puts hpm2 in S0, parks the PIPE and fills the PHY's
+ * tunables.
  */
 &nub_spmi_a1 {
-	hpm2: usb-pd@c {
-		compatible = "apple,sn201202x";
-		reg = <0xc SPMI_USID>;
-
-		typec2: connector {
-			compatible = "usb-c-connector";
-			label = "USB-C Right";
-			power-role = "dual";
-			data-role = "dual";
-
-			ports {
-				#address-cells = <1>;
-				#size-cells = <0>;
-
-				port@0 {
-					reg = <0>;
-					typec2_hs: endpoint {
-						remote-endpoint = <&usb_drd2_hs>;
-					};
-				};
-
-				port@1 {
-					reg = <1>;
-					typec2_ss: endpoint {
-						remote-endpoint = <&atc2_phy_typec>;
-					};
-				};
-			};
-		};
-	};
-};
-
-&ps_atc2_common {
+	reg = <0x2 0x8a1a8000 0x0 0x4000>;
+	/delete-property/ interrupts;
 	status = "okay";
 };
 
-&ps_atc2_usb_aon {
-	status = "okay";
-};
+#include "t6050-max-atc2.dtsi"
 
-&ps_atc2_phymxwrap {
-	status = "okay";
-};
-
-&ps_atc2_usb {
-	status = "okay";
-};
-
-&atc2_phy_mbox {
-	status = "okay";
-};
-
-&atc2_phy {
-	status = "okay";
-
-	port {
-		atc2_phy_typec: endpoint {
-			remote-endpoint = <&typec2_ss>;
-		};
-	};
-};
-
-&usb_drd2 {
-	status = "okay";
-
-	port {
-		usb_drd2_hs: endpoint {
-			remote-endpoint = <&typec2_hs>;
-		};
-	};
-};
-
-&usb_drd2_dart_0 {
-	status = "okay";
-};
-
-&usb_drd2_dart_1 {
-	status = "okay";
-};
-
-/* Audio is not brought up: six sn012776 on i2c1/i2c3 and a cs42l84 on i2c2 */
-&i2c1 {
-	status = "disabled";
-};
-
-&i2c2 {
-	status = "disabled";
+/* A host DROM (the J714s's, ADT /arm-io/acio2 thunderbolt-drom) until the boot loader replaces it */
+&acio2_nhi {
+	apple,thunderbolt-drom = [fd 02 00 00 00 00 00 00 00 90 19 c3 8c 00 5c 00
+			00 00 00 00 00 00 08 81 82 02 82 00 00 00 08 82
+			92 01 82 00 00 00 03 83 20 08 84 00 00 00 00 00
+			00 08 85 00 00 00 00 00 00 05 86 09 01 00 08 87
+			00 00 00 00 00 00 05 88 09 01 00 05 89 09 01 00
+			05 8a 09 01 00 0e 01 41 70 70 6c 65 2c 20 49 6e
+			63 2e 00 06 02 69 4f 53 00 00 00 00];
 };
 
 /*
  * Pin 112 takes an SError when read (as on the J716c), so only the pins a node
- * here names are exposed: 80 (PCIe port 0's PERST#).
+ * here names are exposed: 80 (PCIe port 0's PERST#), 106 and 107 (the speaker
+ * amps' interrupt and shutdown line), 134 and 139 (the jack codec's interrupt
+ * and reset).
  */
 &pinctrl_ap {
-	gpio-reserved-ranges = <0 80>, <81 140>;
+	gpio-reserved-ranges = <0 80>, <81 25>, <108 26>, <135 4>, <140 81>;
 };
 
 /*
@@ -568,5 +501,464 @@
 	};
 };
 
-#define T6050_J716S
-#include "t6050-peripherals.dtsi"
+/*
+ * The SEP (ADT sep, dart-sep): its mailbox, and its power domain with the two
+ * fabric parents left to the firmware, which genpd votes on and never turns off.
+ * The boot loader enables the SEP itself through its alias.
+ */
+&sep_mbox {
+	status = "okay";
+};
+
+&ps_sep {
+	status = "okay";
+};
+
+&ps_fab8_soc {
+	apple,firmware-owned;
+	status = "okay";
+};
+
+&ps_fab0_piogw {
+	apple,firmware-owned;
+	status = "okay";
+};
+
+/*
+ * The ProRes engine (apr0) and its DART, in the SCODEC power state. Its
+ * parent fab7-soc also feeds the display pipeline, so it is left to the
+ * firmware, as fab0-piogw is.
+ */
+&ps_fab7_soc {
+	apple,firmware-owned;
+	status = "okay";
+};
+
+&ps_scodec {
+	status = "okay";
+};
+
+&apr0_dart {
+	status = "okay";
+};
+
+&apr0 {
+	status = "okay";
+};
+
+/*
+ * Both JPEG engines and their shared DART, under the media fabric that the
+ * video encoder above already enables.
+ */
+&ps_jpg {
+	status = "okay";
+};
+
+&jpeg0_dart {
+	status = "okay";
+};
+
+&jpeg0 {
+	status = "okay";
+};
+
+&jpeg1 {
+	status = "okay";
+};
+
+/* The same T6050 camera as J716c; the loader sets the sensor type. */
+#include "t6050-j716c-isp.dtsi"
+
+/* The GPU and the internal panel, for the boot loader's handoff */
+#include "t6050-j714s-gpu-panel.dtsi"
+
+/* External displays, on the left-front and right ports */
+#include "t6050-j714s-display.dtsi"
+
+/* The Neural Engine, started only after the boot loader's preload hand-off */
+#include "t6050-j714s-ane.dtsi"
+
+/*
+ * Sound through the AOP, as on J813 and the J714s: its audio service runs the serializers, the
+ * CS42L84 headphone jack on admac-base-ns TX2/RX2 and the six SN012776 speaker amps
+ * on TX0, their voltage and current sense on RX0 (ADT iop-audio-controller).
+ *
+ * The amps (ADT /arm-io/i2c1/audio-speaker* and /arm-io/i2c3/audio-speaker*) share
+ * one shutdown line, AP pin 107 (function-reset of the first), and one fault
+ * interrupt, pin 106. The ADT's speaker-config gives amp N playback slot N, its
+ * voltage sense in slot 4N and current sense in 4N+2, in the order of the first
+ * amp's speakerN: left woofer 1, right woofer 1, left woofer 2, right woofer 2,
+ * left tweeter, right tweeter. The firmware's speaker frame is 250 BCLKs of 12 MHz
+ * (ADT audio-speaker stream), which the amps' ratio detection rejects.
+ */
+/ {
+	speaker_sdz: regulator-sn012776-sdz {
+		compatible = "regulator-fixed";
+		regulator-name = "sn012776-sdz";
+		gpios = <&pinctrl_ap 107 GPIO_ACTIVE_HIGH>;
+		enable-active-high;
+	};
+};
+
+&i2c1 {
+	status = "okay";
+
+	speaker_left_woof1: codec@38 {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x38>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Woofer 1";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <2>;
+		ti,vmon-slot-no = <0>;
+		ti,bclk-ratio = <250>;
+	};
+
+	speaker_left_woof2: codec@39 {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x39>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Woofer 2";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <10>;
+		ti,vmon-slot-no = <8>;
+		ti,bclk-ratio = <250>;
+	};
+
+	speaker_left_tweet: codec@3a {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3a>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Left Tweeter";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <18>;
+		ti,vmon-slot-no = <16>;
+		ti,bclk-ratio = <250>;
+	};
+};
+
+/* The I2C power states have no described parent (SIO), as for i2c1 and i2c2 */
+&ps_i2c3 {
+	/delete-property/ power-domains;
+	status = "okay";
+};
+
+&i2c3 {
+	/* The ADT gives i2c1, i2c2 and i2c3 the same clock-ids (4) */
+	clocks = <&clkref>;
+	status = "okay";
+
+	speaker_right_woof1: codec@3b {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3b>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Woofer 1";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <6>;
+		ti,vmon-slot-no = <4>;
+		ti,bclk-ratio = <250>;
+	};
+
+	speaker_right_woof2: codec@3c {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3c>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Woofer 2";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <14>;
+		ti,vmon-slot-no = <12>;
+		ti,bclk-ratio = <250>;
+	};
+
+	speaker_right_tweet: codec@3d {
+		compatible = "ti,sn012776", "ti,tas2764";
+		reg = <0x3d>;
+		SDZ-supply = <&speaker_sdz>;
+		apple,sdz-group-fail-closed;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Right Tweeter";
+		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
+		ti,imon-slot-no = <22>;
+		ti,vmon-slot-no = <20>;
+		ti,bclk-ratio = <250>;
+	};
+};
+
+/*
+ * The CS42L84 headphone codec (ADT /arm-io/i2c2/audio-codec-output): its reset line
+ * is AP pin 139, driven high to run the codec, and its interrupt AP pin 134, level
+ * low.
+ */
+&i2c2 {
+	status = "okay";
+
+	jack_codec: codec@4b {
+		compatible = "cirrus,cs42l84";
+		reg = <0x4b>;
+		reset-gpios = <&pinctrl_ap 139 GPIO_ACTIVE_HIGH>;
+		interrupts-extended = <&pinctrl_ap 134 IRQ_TYPE_LEVEL_LOW>;
+		#sound-dai-cells = <0>;
+		sound-name-prefix = "Jack";
+	};
+};
+
+/ {
+	sound {
+		compatible = "apple,j716-macaudio", "apple,macaudio";
+		model = "MacBook Pro J716";
+		#address-cells = <1>;
+		#size-cells = <0>;
+
+		dai-link@0 {
+			reg = <0>;
+			link-name = "Headphone Jack";
+
+			cpu {
+				sound-dai = <&aop_audio 0>;
+			};
+
+			codec {
+				sound-dai = <&jack_codec>;
+			};
+		};
+
+		dai-link@1 {
+			reg = <1>;
+			link-name = "Speaker";
+			/*
+			 * Codecs in ADT speaker-config order, so that macaudio gives them
+			 * playback slots 0-5 as macOS does (left channels in slots 0, 2
+			 * and 4, right in 1, 3 and 5). The idle masks are the ADT
+			 * amp-tx-zd-config rows 0 and 1: left woofer 1 drives zeros in the
+			 * right amps' sense slots, right woofer 1 in the left amps'.
+			 */
+			dai-tdm-idle-mode-0 = "zero";
+			dai-tdm-slot-tx-idle-mask-0 = <0xfff0f0f0>;
+			dai-tdm-idle-mode-1 = "zero";
+			dai-tdm-slot-tx-idle-mask-1 = <0xff0f0f0f>;
+
+			cpu {
+				sound-dai = <&aop_audio 3>;
+			};
+
+			codec {
+				sound-dai = <&speaker_left_woof1>, <&speaker_right_woof1>,
+					    <&speaker_left_woof2>, <&speaker_right_woof2>,
+					    <&speaker_left_tweet>, <&speaker_right_tweet>;
+			};
+		};
+	};
+};
+
+/* The AOP, booted through its setup port, with its sensor and audio services. */
+&aop_mbox {
+	status = "okay";
+};
+
+&aop_setup_mbox {
+	status = "okay";
+};
+
+&aop_dart {
+	status = "okay";
+};
+
+&aop {
+	status = "okay";
+};
+
+/*
+ * The microphone array: ADT audio-hp-mic, three microphones on leap-s RX0 through the
+ * proxy ADMAC (Linux channel 1, as on J813), captured by the AOP audio service's own card.
+ */
+&admac_base_ns {
+	status = "okay";
+};
+
+&admac_ec_proxy {
+	status = "okay";
+};
+
+&aop_audio {
+	apple,chassis-name = "J716";
+	apple,machine-kind = "MacBook Pro";
+	dmas = <&admac_base_ns 4>, <&admac_base_ns 5>,
+	       <&admac_base_ns 0>, <&admac_base_ns 1>,
+	       <&admac_ec_proxy 1>;
+	dma-names = "cout", "cin", "spkr", "sense", "hpai";
+};
+
+/* The video decoder (ADT avd0, as on the J714c), its DART and power states. */
+&pmgr4 {
+	status = "okay";
+};
+
+/* macOS turns FAB1_SOC on once at boot and never gates it. */
+&ps_fab1_soc {
+	apple,always-on;
+	status = "okay";
+};
+
+&ps_avd_sys {
+	status = "okay";
+};
+
+&avd_dart {
+	status = "okay";
+};
+
+&avd {
+	status = "okay";
+};
+
+/*
+ * The video encoder (ADT ave0), its DARTs and the VENC0 power states. Like
+ * FAB1_SOC, macOS sets FAB0_SOC active once at boot and never gates it; the PIO
+ * gateway above it is left to the firmware.
+ */
+&ps_fab1_piogw {
+	apple,firmware-owned;
+	status = "okay";
+};
+
+&ps_fab0_soc {
+	apple,always-on;
+	status = "okay";
+};
+
+&ps_venc0_sys {
+	status = "okay";
+};
+
+&ps_venc0_dma {
+	status = "okay";
+};
+
+&ps_venc0_pipe4 {
+	status = "okay";
+};
+
+&ps_venc0_pipe5 {
+	status = "okay";
+};
+
+&ps_venc0_me0 {
+	status = "okay";
+};
+
+&ps_venc0_me1 {
+	status = "okay";
+};
+
+&ave0_dart {
+	status = "okay";
+};
+
+&ave0_dart1 {
+	status = "okay";
+};
+
+&ave0 {
+	status = "okay";
+};
+
+/*
+ * The internal 16.2-inch mini-LED panel on the die's display engine (dcp), the
+ * boot loader's hand-off target. The dimensions and the 600 nit maximum
+ * brightness are the panel's; the 14-inch panel of t6050-j714s-gpu-panel.dtsi is
+ * replaced. The display driver does not probe without the bandwidth scratch: the
+ * PMC metadata's register block (dispext0 reg[4]), word 5 at +0x20000. The
+ * firmware asks for its clocks by index into apple,clock-ids (ADT disp0
+ * clock-ids 361 and 458, as on the J716c); the loader verifies the identifiers
+ * and fills the rates.
+ */
+/ {
+	dcp_fw_clk361: clock-dcp-firmware-361 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <810000000>;
+		clock-output-names = "dcp_firmware_361";
+	};
+
+	dcp_fw_clk458: clock-dcp-firmware-458 {
+		compatible = "fixed-clock";
+		#clock-cells = <0>;
+		clock-frequency = <521064992>;
+		clock-output-names = "dcp_firmware_458";
+	};
+};
+
+&dcp {
+	apple,dcp-index = <0>;
+	apple,bw-scratch = <&dcpext0_pmc 0 5 0x20000>;
+	apple,clock-ids = <361 458>;
+	clocks = <&dcp_fw_clk361>, <&dcp_fw_clk458>;
+	clock-names = "firmware-0", "firmware-1";
+
+	panel {
+		compatible = "apple,panel-j716", "apple,panel-mini-led", "apple,panel";
+		width-mm = <345>;
+		height-mm = <223>;
+		/delete-property/ adj-height-mm;
+		apple,max-brightness = <600>;
+	};
+};
+
+/*
+ * The boot NOR and its NVRAM partition, for asahi-nvram and asahi-bless. ADT
+ * /arm-io/qspi has one child, spinor (chip select 0), with the children
+ * firmware, anvram and syscfg; anvram is 0x700000, 0xc0000 (12 banks of 64 KiB,
+ * /chosen nvram-bank-count 12, nvram-bank-size 0x10000). Only the partition is
+ * described, single-wire as on the J775D, so spi-nor sends no quad-enable write
+ * at probe. spi-apple-qspi refuses programs and erases until its board row
+ * qualifies the part.
+ */
+&qspi {
+	status = "okay";
+
+	flash@0 {
+		compatible = "jedec,spi-nor";
+		reg = <0>;
+		spi-max-frequency = <25000000>;
+		spi-rx-bus-width = <1>;
+		spi-tx-bus-width = <1>;
+
+		partitions {
+			compatible = "fixed-partitions";
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			nvram: partition@700000 {
+				label = "nvram";
+				reg = <0x700000 0xc0000>;
+			};
+		};
+	};
+};
+
+/*
+ * The GPU's power states. The group's PMGR (pmgr_gpx) stays disabled and the boot loader
+ * enables it with the GPU hand-off, as for the GPU and its mailboxes; the states under it
+ * are enabled here so that enabling the group is enough.
+ */
+&ps_gpx {
+	status = "okay";
+};
+
+&ps_afr {
+	status = "okay";
+};
+
+&ps_gfx {
+	status = "okay";
+};

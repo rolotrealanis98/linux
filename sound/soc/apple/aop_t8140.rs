@@ -1006,9 +1006,6 @@ impl SndSocT8140AopData {
     /// Output mute (property 700) is independent of the amplifier's SD_MODE;
     /// the amplifier stays off across a failure here.
     fn spkr_set_mute(&self, muted: bool) -> Result<()> {
-        if !self.hw.spkr_output_mute {
-            return Ok(());
-        }
         let ret = self.epic_wrapped_call(&AudioSetDeviceProp::new(
             AUDIO_DEV_SPKR,
             PROP_OUTPUT_MUTE,
@@ -3007,11 +3004,6 @@ pub(crate) struct HwConfig {
     spkr_leap: bool,
     /// Speaker playback channels.
     spkr_channels: u32,
-    /// The speaker service has an output mute (property 700) the host
-    /// toggles around pwrd (T8140). T6050's rejects it as not found
-    /// (0xe00002f0): the stream runs unmuted from pwrd and the amplifiers'
-    /// own shutdown does the muting.
-    spkr_output_mute: bool,
     /// The speaker back-end's capture: the tap service on its own channel
     /// (0, T8140) or the speaker service's own V/I sense return with this
     /// many 16-bit channels (T6050).
@@ -3027,7 +3019,6 @@ pub(crate) const HW_T8140: HwConfig = HwConfig {
     ap_power_domains: true,
     spkr_leap: true,
     spkr_channels: 2,
-    spkr_output_mute: true,
     sense_channels: 0,
     fe_dai_names: [c"j700-pcm-0", c"j700-pcm-1", c"j700-pcm-2"],
     fe_dma_names: FE_DMA_NAMES,
@@ -3042,7 +3033,6 @@ pub(crate) const HW_T6050: HwConfig = HwConfig {
     ap_power_domains: false,
     spkr_leap: false,
     spkr_channels: 6,
-    spkr_output_mute: false,
     sense_channels: 12,
     fe_dai_names: [c"j714-pcm-0", c"j714-pcm-1", c"j714-pcm-2"],
     fe_dma_names: [

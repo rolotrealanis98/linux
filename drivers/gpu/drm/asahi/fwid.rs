@@ -546,12 +546,45 @@ mod tests {
             &crate::hw::t6050::CONFIG_ULTRA,
             &crate::hw::t6050::CONFIG_MAX,
             &crate::hw::t6050::CONFIG,
+            &crate::hw::t6050::CONFIG_J716S,
         ] {
             let crate::g17::fw::variant::Firmware::Identified(builds) = cfg.firmware else {
                 panic!("an M5 board on bare metal must identify its loaded firmware");
             };
             t6050_admits_only(builds);
         }
+    }
+
+    #[test]
+    fn j716s_builds_name_their_layouts() {
+        use crate::g17::fw::variant::{Firmware, M5Layouts};
+        let Firmware::Identified(builds) = crate::hw::t6050::CONFIG_J716S.firmware else {
+            panic!("the M5 Pro must identify its loaded firmware");
+        };
+        assert_eq!(builds.len(), 3);
+        for (i, build) in builds.iter().enumerate() {
+            // 27.2 (26B123) moved the InitData layouts; 27.3 (26C5035r) added a HW data word.
+            let layouts = if build.os_version >= [27, 3, 0] {
+                M5Layouts::V26C5035
+            } else if build.os_version >= [27, 2, 0] {
+                M5Layouts::V26B123
+            } else {
+                M5Layouts::V26A428
+            };
+            assert_eq!(build.variant.m5_layouts, Some(layouts));
+            // The board the build runs with builds the graph of those layouts.
+            let config = build.config.unwrap_or(&crate::hw::t6050::CONFIG_J716S);
+            assert_eq!(config.m5.unwrap().graph.layouts, layouts);
+            for other in &builds[i + 1..] {
+                assert_ne!(build.images[0].text_sha256, other.images[0].text_sha256);
+            }
+        }
+        // The 14-inch board keeps the one build it was measured with.
+        let Firmware::Identified(builds) = crate::hw::t6050::CONFIG.firmware else {
+            panic!("the M5 Pro must identify its loaded firmware");
+        };
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].variant.m5_layouts, Some(M5Layouts::V26A428));
     }
 
     fn t6050_admits_only(builds: &[crate::g17::fw::variant::Build]) {

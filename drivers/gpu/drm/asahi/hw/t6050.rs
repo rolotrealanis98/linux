@@ -6,6 +6,7 @@
 use crate::g17::{Config, CoreLayout, CrashBuffers, FirmwareProfile, Identity};
 use crate::hw::{GpuGen, GpuVariant};
 use crate::regs::G17Id;
+use kernel::prelude::*;
 
 /// M5 Pro (J714s): ID variant 3, GPU variant S, on bare metal like the M5 Max.
 pub(crate) const CONFIG: Config = Config {
@@ -79,6 +80,122 @@ pub(crate) const CONFIG: Config = Config {
         deflake: crate::g17::fw::render::Deflake::TWO_CLUSTERS,
         compute_blocks: crate::g17::fw::freelist::COMPUTE_BLOCKS,
     },
+};
+
+/// The G17S builds the 16-inch M5 Pro (J716s) admits, newest first. The boot loader loads both
+/// roles' TEXT back to back into `fw-text`: the primary's 0x50000, then the secondary's 0x54000,
+/// each with its own GKTS/ECAP entropy records. Per role, two load fields of the image header and
+/// the boot loader's two boot-argument sections are zeroed, so a loaded copy normalizes to the
+/// digest of the firmware file's TEXT on every boot.
+///
+/// 27.2 and 27.3 read their own InitData layouts, so each runs with the configuration whose board
+/// names that graph; 27.0 keeps [`CONFIG_J716S`]'s.
+const J716S_BUILDS: &[crate::g17::fw::variant::Build] = &[
+    crate::g17::fw::variant::Build {
+        os_version: [27, 3, 0],
+        name: "27.3 (26C5035r), G17S",
+        images: &[crate::fwid::FirmwareBuild {
+            name: "26C5035r for T6050 G17S, primary then secondary",
+            text_size: 0xa4000,
+            data_size: 0x184000,
+            entropy: &[[0x49eac, 0x49f8f], [0x9d92c, 0x9da0f]],
+            boot_filled: &[
+                (0x224, 4),
+                (0x23c, 8),
+                (0x4976c, 0x740),
+                (0x49eac, 0x231),
+                (0x50224, 4),
+                (0x5023c, 8),
+                (0x9d1ec, 0x740),
+                (0x9d92c, 0x231),
+            ],
+            text_sha256: [
+                0xb5, 0x53, 0x7c, 0x8f, 0x06, 0xbd, 0x19, 0xeb, 0xf0, 0xef, 0xd0, 0xcb, 0xfb, 0x65,
+                0x52, 0x33, 0x9a, 0x10, 0xd4, 0xaf, 0xc4, 0xed, 0xa9, 0xd2, 0x1c, 0xbe, 0xdc, 0x36,
+                0x66, 0x76, 0x36, 0x00,
+            ],
+        }],
+        variant: &crate::g17::fw::variant::V26C5035_M5,
+        config: Some(&CONFIG_J716S_26C5035),
+    },
+    crate::g17::fw::variant::Build {
+        os_version: [27, 2, 0],
+        name: "27.2 (26B123), G17S",
+        images: &[crate::fwid::FirmwareBuild {
+            name: "26B123 for T6050 G17S, primary then secondary",
+            text_size: 0xa4000,
+            data_size: 0x184000,
+            entropy: &[[0x49ea4, 0x49f87], [0x9d92c, 0x9da0f]],
+            boot_filled: &[
+                (0x224, 4),
+                (0x23c, 8),
+                (0x49764, 0x740),
+                (0x49ea4, 0x231),
+                (0x50224, 4),
+                (0x5023c, 8),
+                (0x9d1ec, 0x740),
+                (0x9d92c, 0x231),
+            ],
+            text_sha256: [
+                0x2b, 0x46, 0x13, 0xc6, 0x2a, 0x8a, 0x00, 0x7f, 0x22, 0xa9, 0x41, 0x01, 0x70, 0x2c,
+                0x9a, 0xc6, 0xc4, 0xe9, 0x0f, 0x2e, 0x12, 0x3f, 0x3b, 0x36, 0xfb, 0xe6, 0xff, 0xea,
+                0x91, 0x3f, 0x0f, 0xd9,
+            ],
+        }],
+        variant: &crate::g17::fw::variant::V26B123_M5,
+        config: Some(&CONFIG_J716S_26B123),
+    },
+    crate::g17::fw::variant::Build {
+        os_version: [27, 0, 0],
+        name: "27.0 (26A428), G17S",
+        images: &[crate::fwid::FirmwareBuild {
+            name: "26A428 for T6050 G17S, primary then secondary",
+            text_size: 0xa4000,
+            data_size: 0x184000,
+            entropy: &[[0x49e60, 0x49f43], [0x9d918, 0x9d9fb]],
+            boot_filled: &[
+                (0x224, 4),
+                (0x23c, 8),
+                (0x49720, 0x740),
+                (0x49e60, 0x231),
+                (0x50224, 4),
+                (0x5023c, 8),
+                (0x9d1d8, 0x740),
+                (0x9d918, 0x231),
+            ],
+            text_sha256: [
+                0x85, 0xd0, 0xfd, 0x82, 0x80, 0xf7, 0x24, 0x65, 0x5c, 0xa9, 0xa9, 0x71, 0x7b, 0xc9,
+                0x1a, 0x8a, 0x5e, 0xf6, 0x09, 0x28, 0xd7, 0x72, 0x00, 0xf6, 0xd5, 0x3b, 0xd0, 0x99,
+                0xb9, 0x47, 0x39, 0xc6,
+            ],
+        }],
+        variant: &crate::g17::fw::variant::V26A428_M5,
+        config: None,
+    },
+];
+
+/// The machine compatible of the 16-inch M5 Pro.
+const J716S_MACHINE: &[u8] = b"apple,j716s";
+
+/// M5 Pro, 16-inch (J716s): [`CONFIG`] with the J716s tables, whose voltages differ from J714's
+/// in every active state, and the 27.0, 27.2 and 27.3 firmware. Its ID registers are J714's
+/// (variant 3), so the machine compatible selects it ([`config`]).
+pub(crate) const CONFIG_J716S: Config = Config {
+    m5: Some(&crate::g17::fw::m5::initdata::J716S),
+    firmware: crate::g17::fw::variant::Firmware::Identified(J716S_BUILDS),
+    ..CONFIG
+};
+
+/// The J716s on 27.2 (26B123): the board on that build's InitData graph.
+const CONFIG_J716S_26B123: Config = Config {
+    m5: Some(&crate::g17::fw::m5::initdata::J716S_26B123),
+    ..CONFIG
+};
+
+/// The J716s on 27.3 beta 1 (26C5035r): the board on that build's InitData graph.
+const CONFIG_J716S_26C5035: Config = Config {
+    m5: Some(&crate::g17::fw::m5::initdata::J716S_26C5035),
+    ..CONFIG
 };
 
 /// M5 Max: ID variant 4, GPU variant C, HAL generation 300 like the M5 Pro.
@@ -240,14 +357,34 @@ pub(crate) const CONFIG_ULTRA: Config = Config {
 
 // Each compute operand bank holds 6 KiB per core slot of the board.
 const _: () = {
-    use crate::g17::fw::m5::initdata::{J714, J716C, J775D};
+    use crate::g17::fw::m5::initdata::{J714, J716C, J716S, J716S_26B123, J716S_26C5035, J775D};
     assert!(CONFIG.core_layout.operand_state.bank_bytes() == J714.gpu_cores * 0x1800);
+    assert!(CONFIG_J716S.core_layout.operand_state.bank_bytes() == J716S.gpu_cores * 0x1800);
+    assert!(J716S_26B123.gpu_cores == J716S.gpu_cores && J716S_26C5035.gpu_cores == J716S.gpu_cores);
     assert!(CONFIG_MAX.core_layout.operand_state.bank_bytes() == J716C.gpu_cores * 0x1800);
     assert!(CONFIG_ULTRA.core_layout.operand_state.bank_bytes() == J775D.gpu_cores * 0x1800);
 };
 
-/// Every T6050 board binds the same compatible; the ID registers select the configuration.
+/// Whether the machine's compatible list (the root node's) names `compatible`.
+fn machine_is(compatible: &[u8]) -> bool {
+    let Some(root) = kernel::of::root() else {
+        return false;
+    };
+    let Ok(machine) = root.get_property::<KVec<u8>>(kernel::c_str!("compatible")) else {
+        return false;
+    };
+    machine.split(|byte| *byte == 0).any(|name| name == compatible)
+}
+
+/// Every T6050 board binds the same compatible; the ID registers select the configuration. The
+/// two M5 Pro boards read the same ID registers and differ in their tables, so the machine
+/// compatible tells the 16-inch one (J716s) from the 14-inch one (J714s), which keeps [`CONFIG`].
 pub(crate) fn config(id: &G17Id) -> Option<&'static Config> {
-    [&CONFIG, &CONFIG_MAX, &CONFIG_ULTRA].into_iter().find(|cfg| id.family == cfg.identity.family
+    let pro = if machine_is(J716S_MACHINE) {
+        &CONFIG_J716S
+    } else {
+        &CONFIG
+    };
+    [pro, &CONFIG_MAX, &CONFIG_ULTRA].into_iter().find(|cfg| id.family == cfg.identity.family
         && id.variant == cfg.identity.variant && id.num_dies == cfg.identity.num_dies)
 }

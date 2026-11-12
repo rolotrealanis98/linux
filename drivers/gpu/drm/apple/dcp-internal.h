@@ -554,6 +554,8 @@ struct apple_dcp {
 	struct dcp_swap_submit_req_v27 present_v27;
 	/* Both paired wire records belong to the primary endpoint lock. */
 	struct dcp_swap_submit_req_v27 peer_present_v27;
+	/* The firmware 27.3 copy of either record (iomfb_v27_swap_wire()). */
+	struct dcp_swap_submit_req_v27_3 present_v27_3;
 
 	/* DCP shared memory */
 	void *shmem;

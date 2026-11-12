@@ -60,6 +60,8 @@ static void dcp_peer_started_on_owner(struct apple_dcp *owner, void *data, void 
 	struct dcp_swap_start_resp_h17p *resp = data;
 	struct apple_dcp *peer = dcp_peer_scanout_v27(owner);
 	u32 id = owner->swap.h17p.swap.swap_id;
+	void *wire;
+	u32 len;
 
 	lockdep_assert_held(&owner->iomfb.lock);
 	if (IS_ERR_OR_NULL(peer) || peer != cookie || resp->ret || resp->swap_id != id) {
@@ -84,13 +86,15 @@ static void dcp_peer_started_on_owner(struct apple_dcp *owner, void *data, void 
 	dcp_peer_swap_armed_v27(owner, id);
 	trace_iomfb_swap_submit(owner, id);
 	trace_iomfb_swap_submit(peer, id);
-	dcp_push(owner, false, &owner->v27_methods[dcpep_swap_submit], sizeof(owner->present_v27),
-		 sizeof(struct dcp_swap_submit_resp_v27), &owner->present_v27,
+	wire = iomfb_v27_swap_wire(owner, &owner->present_v27, &owner->present_v27_3, &len);
+	dcp_push(owner, false, &owner->v27_methods[dcpep_swap_submit], len,
+		 sizeof(struct dcp_swap_submit_resp_v27), wire,
 		 dcp_peer_submitted, owner);
 	if (READ_ONCE(owner->crashed))
 		return;
-	dcp_push(peer, false, &peer->v27_methods[dcpep_swap_submit], sizeof(owner->peer_present_v27),
-		 sizeof(struct dcp_swap_submit_resp_v27), &owner->peer_present_v27,
+	wire = iomfb_v27_swap_wire(peer, &owner->peer_present_v27, &owner->present_v27_3, &len);
+	dcp_push(peer, false, &peer->v27_methods[dcpep_swap_submit], len,
+		 sizeof(struct dcp_swap_submit_resp_v27), wire,
 		 dcp_peer_submitted, owner);
 	if (READ_ONCE(peer->crashed))
 		dcp_peer_swap_error(owner, "peer publication", -EIO);

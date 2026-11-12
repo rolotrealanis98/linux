@@ -423,6 +423,11 @@ static void dcp_swap_submit(struct apple_dcp *dcp, bool oob,
 			    dcp_callback_t cb, void *cookie)
 {
 	const void *data = request;
+#if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
+	u32 len = sizeof(struct dcp_swap_submit_req_v27);
+#else
+	u32 len = sizeof(*request);
+#endif
 
 	if (dcp->hw.iomfb_method_profile != DCP_IOMFB_METHODS_H17G) {
 		iomfb_serialize_present_h17p(&dcp->present_h17p, request);
@@ -438,22 +443,22 @@ static void dcp_swap_submit(struct apple_dcp *dcp, bool oob,
 		dcp->present_v27.swap.brightness_nits =
 			get_unaligned_le64(dcp->present_h17p.swap + 0x35e);
 		dcp_external_stamp_submit(dcp, &dcp->present_v27.swap);
-		if (dcp_has_panel(dcp))
+		/*
+		 * The EDR words are not placed for the firmware 27.3 swap yet:
+		 * that build gets the SDR swap it has been tested with.
+		 */
+		if (dcp_has_panel(dcp) && !iomfb_v27_swap_is_27_3(dcp))
 			dcp_edr_prepare_v27(dcp, &dcp->present_v27.swap,
 					    dcp->present_v27.swap.brightness_update,
 					    dcp->edr_present_sdr);
-		data = &dcp->present_v27;
+		data = iomfb_v27_swap_wire(dcp, &dcp->present_v27,
+					   &dcp->present_v27_3, &len);
 #else
 		data = &dcp->present_h17p;
 #endif
 	}
 
-	dcp_push(dcp, oob, &dcp_methods[dcpep_swap_submit],
-#if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
-		 sizeof(struct dcp_swap_submit_req_v27),
-#else
-		 sizeof(*request),
-#endif
+	dcp_push(dcp, oob, &dcp_methods[dcpep_swap_submit], len,
 		 sizeof(struct dcp_swap_submit_resp_h17p), (void *)data, cb, cookie);
 }
 #else

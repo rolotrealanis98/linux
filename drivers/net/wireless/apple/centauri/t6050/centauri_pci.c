@@ -383,6 +383,17 @@ static void centauri_t6050_remove(struct pci_dev *pdev)
 	WRITE_ONCE(c->removing, true);
 	cancel_delayed_work_sync(&c->boot_work);
 	mutex_lock(&c->boot_lock);
+	/*
+	 * Nothing to stop on an N1 whose ROM boot never started (no firmware file, no
+	 * DMA, bus mastering never enabled): the config-space accesses of the DMA stop
+	 * hang the SoC at a restart in that state.
+	 */
+	if (!c->boot_attempted) {
+		dev_info(&pdev->dev, "N1 never booted: leaving it untouched\n");
+		c->boot_phase = CEN_BOOT_STOPPED;
+		mutex_unlock(&c->boot_lock);
+		return;
+	}
 	centauri_t6050_wifi_unregister(c);
 	centauri_t6050_free_boot(c);
 	c->boot_phase = CEN_BOOT_STOPPED;

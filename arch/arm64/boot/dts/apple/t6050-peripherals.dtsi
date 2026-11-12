@@ -1380,7 +1380,7 @@
 	};
 #endif
 
-#if defined(T6050_J714S) || defined(T6050_K114C) || defined(T6050_K114S) || defined(T6050_K116C) || defined(T6050_K116S)
+#if defined(T6050_J714S) || defined(T6050_J716S) || defined(T6050_K114C) || defined(T6050_K114S) || defined(T6050_K116C) || defined(T6050_K116S)
 #ifndef T6050_J716C
 	nub_spmi_a1: spmi@28a1a8000 {
 		compatible = "apple,t6050-spmi", "apple,t8142-spmi";
@@ -1536,7 +1536,7 @@
 		status = "disabled";
 	};
 
-#if !defined(T6050_J714C) && !defined(T6050_J714S) && !defined(T6050_J716C)
+#if !defined(T6050_J714C) && !defined(T6050_J714S) && !defined(T6050_J716C) && !defined(T6050_J716S)
 	apciec2_dart: iommu@384000000 {
 		compatible = "apple,t6050-dart", "apple,t8110-dart";
 		reg = <0x3 0x84000000 0x0 0x20000>;

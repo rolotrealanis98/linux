@@ -586,6 +586,8 @@ struct apple_dcp {
 	bool v27_a407;
 	struct dcp_swap_submit_req_v27_a407 present_v27_a407;
 	struct dcp_swap_submit_req_v27_a407 peer_present_v27_a407;
+	/* The firmware 27.3 copy of either record (iomfb_v27_swap_wire()). */
+	struct dcp_swap_submit_req_v27_3 present_v27_3;
 
 	/* DCP shared memory */
 	void *shmem;

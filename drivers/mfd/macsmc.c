@@ -85,6 +85,8 @@ static const struct mfd_cell apple_smc_described_devs[] = {
  * them registers what it did before.
  */
 static const struct mfd_cell apple_smc_t6050_described_devs[] = {
+	/* The 'gP' bank, where a board drives one of its lines (the J716s N1's power, gP13) */
+	MFD_CELL_OF("macsmc-gpio", NULL, NULL, 0, 0, "apple,smc-gpio"),
 	MFD_CELL_OF("macsmc-reboot", NULL, NULL, 0, 0, "apple,smc-reboot"),
 	MFD_CELL_OF("macsmc-rtc", NULL, NULL, 0, 0, "apple,smc-rtc"),
 };

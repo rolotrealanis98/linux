@@ -962,3 +962,34 @@
 &ps_gfx {
 	status = "okay";
 };
+
+/*
+ * ATC0 (left-back, the MagSafe side; ADT usb-drd0, hpm0 "left-back") carries the
+ * USB tether: a device-mode controller on the PHY state the boot loader's USB
+ * bring-up leaves, high speed only. The combo PHY driver does not take port 0,
+ * so the controller runs as a plain DWC3 without the Apple glue, and its DARTs
+ * and the controller stay on the power state the loader left.
+ */
+&usb0_dart {
+	/delete-property/ power-domains;
+	status = "okay";
+};
+
+&usb0_dart1 {
+	/delete-property/ power-domains;
+	status = "okay";
+};
+
+&usb_drd0 {
+	compatible = "snps,dwc3";
+	reg = <0x2 0xa2280000 0x0 0xcd00>;
+	/delete-property/ reg-names;
+	/delete-property/ power-domains;
+	dr_mode = "peripheral";
+	maximum-speed = "high-speed";
+	snps,usb2-gadget-lpm-disable;
+	snps,dis_u2_susphy_quirk;
+	snps,dis_u3_susphy_quirk;
+	snps,dis_enblslpm_quirk;
+	status = "okay";
+};

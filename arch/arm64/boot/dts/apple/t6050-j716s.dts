@@ -961,14 +961,33 @@
  * are enabled here so that enabling the group is enough.
  */
 &ps_gpx {
+	apple,always-on;	/* ADT: critical */
 	status = "okay";
 };
 
 &ps_afr {
+	apple,always-on;	/* ADT: critical */
 	status = "okay";
 };
 
+/*
+ * The boot loader's hand-off checks that the GPU's PMGR node holds exactly the four
+ * states gpx, afr, cs and gfx at their ADT registers.
+ */
+&pmgr_gpx {
+	ps_cs: power-controller@108 {
+		compatible = "apple,t6050-pmgr-pwrstate", "apple,t8103-pmgr-pwrstate";
+		reg = <0x108 4>;
+		#power-domain-cells = <0>;
+		#reset-cells = <0>;
+		label = "cs";
+		power-domains = <&ps_afr>;
+	};
+};
+
 &ps_gfx {
+	/* The loaded firmware lives across sleep */
+	apple,always-on;
 	status = "okay";
 };
 
@@ -1001,4 +1020,12 @@
 	snps,dis_u3_susphy_quirk;
 	snps,dis_enblslpm_quirk;
 	status = "okay";
+};
+
+/*
+ * No CLPC link for the GPU: the performance controller is not validated on this
+ * machine, and without the link the GPU runs as it did before the link existed.
+ */
+&sgx {
+	/delete-property/ apple,clpc;
 };

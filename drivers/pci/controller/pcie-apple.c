@@ -6544,7 +6544,8 @@ static int apple_pcie_check_adopted_s2idle(struct apple_pcie *pcie)
 
 	/* Other adopted platforms and deeper sleep remain unqualified. */
 	if (!(of_machine_is_compatible("apple,j716c") ||
-	      of_machine_is_compatible("apple,k114c")) || !pm_suspend_no_platform())
+	      of_machine_is_compatible("apple,k114c") ||
+	      of_machine_is_compatible("apple,j716s")) || !pm_suspend_no_platform())
 		return -EBUSY;
 
 	if (!(readl(pcie->base + CORE_RC_CTL) & CORE_RC_CTL_RUN) ||

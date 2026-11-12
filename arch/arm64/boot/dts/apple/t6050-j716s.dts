@@ -32,7 +32,6 @@
 		/* The loader fills the keyboard layout from the ADT's keyboard node */
 		keyboard = &keyboard;
 		/* the boot loader reserves the SEP firmware and adds its manifests through this alias */
-		sep = &sep;
 		/* The loader finds the boot NOR's NVRAM partition through this alias */
 		nvram = &nvram;
 	};
@@ -506,13 +505,11 @@
  * fabric parents left to the firmware, which genpd votes on and never turns off.
  * The boot loader enables the SEP itself through its alias.
  */
-&sep_mbox {
-	status = "okay";
-};
-
-&ps_sep {
-	status = "okay";
-};
+/*
+ * The SEP itself, its mailbox and ps_sep stay off, and there is no "sep" alias:
+ * this machine's boot loader stops ("sep not found in devtree") when the alias
+ * is there, and does not hand the SEP over.
+ */
 
 &ps_fab8_soc {
 	apple,firmware-owned;
@@ -610,6 +607,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Woofer 1";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [00 0a 00 02];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <2>;
 		ti,vmon-slot-no = <0>;
@@ -623,6 +622,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Woofer 2";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [02 0a 08 0a];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <10>;
 		ti,vmon-slot-no = <8>;
@@ -636,6 +637,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Tweeter";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [04 0a 10 12];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <18>;
 		ti,vmon-slot-no = <16>;
@@ -661,6 +664,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Woofer 1";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [01 0a 04 06];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <6>;
 		ti,vmon-slot-no = <4>;
@@ -674,6 +679,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Woofer 2";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [03 0a 0c 0e];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <14>;
 		ti,vmon-slot-no = <12>;
@@ -687,6 +694,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Tweeter";
+		/* ADT speaker-config row; this machine's boot loader does not copy it */
+		apple,speaker-config = [05 0a 14 16];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <22>;
 		ti,vmon-slot-no = <20>;

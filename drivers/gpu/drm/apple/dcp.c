@@ -1502,6 +1502,12 @@ VISIBLE_IF_KUNIT void dcp_swap_watchdog(struct work_struct *work)
 		WRITE_ONCE(dcp->vrr_enabled, false);
 		dev_warn(dcp->dev, "adaptive swap timed out, restoring fixed refresh\n");
 	}
+	/* The retraining mode set below then installs the panel fixed. */
+	if (dcp_fw27_panel(dcp) && READ_ONCE(dcp->vrr_enabled)) {
+		WRITE_ONCE(dcp->panel_vrr_failed, true);
+		WRITE_ONCE(dcp->vrr_enabled, false);
+		dev_warn(dcp->dev, "adaptive swap timed out, restoring fixed refresh\n");
+	}
 	dev_warn(dcp->dev, "swap not completed, retraining the display\n");
 	dcp_mode_invalidate(&dcp->mode_state);
 	dcp_drm_crtc_vblank(dcp->crtc);
@@ -1512,7 +1518,8 @@ VISIBLE_IF_KUNIT void dcp_swap_watchdog(struct work_struct *work)
 
 void dcp_swap_watchdog_arm(struct apple_dcp *dcp)
 {
-	if (dcp_is_typec_output(dcp) || dcp_desktop_swap_watched(dcp)) {
+	if (dcp_is_typec_output(dcp) || dcp_desktop_swap_watched(dcp) ||
+	    (dcp_fw27_panel(dcp) && READ_ONCE(dcp->vrr_enabled))) {
 		dcp->swap_watchdog_deadline = jiffies +
 			msecs_to_jiffies(DCP_SWAP_WATCHDOG_MS);
 		mod_delayed_work(system_dfl_wq, &dcp->swap_watchdog_wq,

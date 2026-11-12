@@ -648,6 +648,8 @@ struct apple_dcp {
 	bool typec_hpd_held;
 	bool use_timestamps;
 	bool vrr_enabled;
+	/* A firmware 27 panel's adaptive swap stalled: keep it fixed. */
+	bool panel_vrr_failed;
 	/*
 	 * The mode set asks for a PQ signal; output_pq: the one set carries it;
 	 * output_edr: a panel shows the PQ content as EDR, edr_sent: swaps
@@ -1135,6 +1137,14 @@ static inline bool dcp_vrr_live(struct apple_dcp *dcp)
 	return dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP && dcp->main_display &&
 	       dcp_has_panel(dcp);
 }
+
+/* A built-in panel driven by firmware 27 (T6050). */
+static inline bool dcp_fw27_panel(struct apple_dcp *dcp)
+{
+	return dcp->fw_compat == DCP_FIRMWARE_V_27_0 && dcp_has_panel(dcp);
+}
+
+bool dcp_vrr_allowed(struct apple_dcp *dcp);
 
 /*
  * Does @dcp's firmware speak the 14.7 AFK, DPTX and DPAV endpoint protocol,

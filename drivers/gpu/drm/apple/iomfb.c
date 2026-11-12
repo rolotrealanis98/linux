@@ -44,6 +44,23 @@
 #include "parser.h"
 #include "trace.h"
 
+/*
+ * Firmware 27 panels (the T6050 ProMotion panel, 24-120 Hz) have not run
+ * adaptive sync under this driver yet; offer it only when asked.
+ */
+static bool fw27_panel_vrr;
+module_param(fw27_panel_vrr, bool, 0644);
+MODULE_PARM_DESC(fw27_panel_vrr,
+		 "Firmware 27 panels: offer variable refresh through vrr_capable (default: off)");
+
+/* Whether VRR_ENABLED may turn adaptive sync on for @dcp's display. */
+bool dcp_vrr_allowed(struct apple_dcp *dcp)
+{
+	if (!dcp_fw27_panel(dcp))
+		return true;
+	return READ_ONCE(fw27_panel_vrr) && !READ_ONCE(dcp->panel_vrr_failed);
+}
+
 struct dcp_identity_trace {
 	struct apple_dcp *dcp;
 	atomic_t *count;
@@ -2101,7 +2118,12 @@ int dcp_modes_replace(struct apple_dcp *dcp, struct dcp_parse_ctx *ctx,
 				       !dcp_has_panel(dcp);
 		ctx->pq_dsc = dcp->fw_compat == DCP_FIRMWARE_V_27_0;
 	}
-	ctx->zero_vrr_range_fallback = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP;
+	/*
+	 * The firmware 27 panel reports its 120 Hz timing with both range
+	 * fields zero, as the desktop 26.6 panel does: 24-120 Hz when asked.
+	 */
+	ctx->zero_vrr_range_fallback = dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP ||
+		(dcp_fw27_panel(dcp) && READ_ONCE(fw27_panel_vrr));
 	modes = enumerate_modes(ctx, &nr_modes, dcp->width_mm, dcp->height_mm,
 				dcp->notch_height,
 				dcp->fixed_connector_type == DRM_MODE_CONNECTOR_eDP,
@@ -2470,6 +2492,8 @@ edid_done:
 		}
 		vrr_capable |= modes[i].vrr;
 	}
+	if (!dcp_vrr_allowed(dcp))
+		vrr_capable = false;
 	drm_connector_set_vrr_capable_property(connector, vrr_capable);
 modes_done:
 	mutex_unlock(&dcp->dcpavserv.lock);
@@ -3650,6 +3674,44 @@ failed:
 	schedule_work(&dcp->vblank_wq);
 }
 
+/*
+ * Firmware 27 writes the adaptive sync range into the timing generator when
+ * a mode is selected (UPPipeDCP_H17GSCD::program_M3_gen_config), so a new
+ * minimum rate takes the mode selected again.  VRR_ENABLED comes with a
+ * plain page flip, which may not set a mode: select the current mode again
+ * from that flip, with adaptive sync as VRR_ENABLED asks.  The panel goes
+ * dark for the length of that mode set.  Returns false when that mode set
+ * failed and the flip has no mode to go to.
+ */
+static bool dcp_fw27_vrr_switch(struct apple_dcp *dcp, struct drm_crtc *crtc,
+				struct drm_atomic_commit *commit)
+{
+	struct drm_crtc_state *crtc_state =
+		drm_atomic_get_new_crtc_state(commit, crtc);
+	struct dcp_display_mode mode;
+	bool vrr;
+
+	if (!crtc_state || !crtc_state->active ||
+	    drm_atomic_crtc_needs_modeset(crtc_state) ||
+	    !READ_ONCE(dcp->mode_state.valid) ||
+	    !lookup_mode(dcp, &crtc_state->mode, &mode))
+		return true;
+
+	vrr = mode.vrr && crtc_state->vrr_enabled && dcp_vrr_allowed(dcp);
+	if (vrr == READ_ONCE(dcp->vrr_enabled))
+		return true;
+
+	dev_info(dcp->dev, "VRR_ENABLED %u: selecting " DRM_MODE_FMT " again\n",
+		 crtc_state->vrr_enabled, DRM_MODE_ARG(&crtc_state->mode));
+	dcp_mode_invalidate(&dcp->mode_state);
+	if (!dcp_crtc_atomic_modeset(crtc, commit))
+		return true;
+	/* The recovery mode set that follows installs the panel fixed. */
+	if (vrr)
+		WRITE_ONCE(dcp->panel_vrr_failed, true);
+	return false;
+}
+
 void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
 {
 	struct platform_device *pdev = to_apple_crtc(crtc)->dcp;
@@ -3714,6 +3776,11 @@ void dcp_flush(struct drm_crtc *crtc, struct drm_atomic_commit *commit)
 		dcp_edr_sync(dcp, crtc, commit);
 		if (dcp->fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP)
 			dcp_hdr_metadata_sync(dcp, crtc, commit);
+	}
+
+	if (dcp_fw27_panel(dcp) && !dcp_fw27_vrr_switch(dcp, crtc, commit)) {
+		schedule_work(&dcp->vblank_wq);
+		return;
 	}
 
 	if (iomfb_uses_queue(dcp)) {

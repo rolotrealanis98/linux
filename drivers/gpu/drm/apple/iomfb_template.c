@@ -4043,6 +4043,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	struct dcp_wait_cookie *cookie;
 	struct dcp_color_mode *cmode = NULL;
 	bool paired = false;
+	bool vrr_on;
 	int ret;
 
 	if (!lookup_mode(dcp, &crtc_state->mode, mode)) {
@@ -4087,6 +4088,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 
 	/* Built-in ProMotion panels require timestamps even in fixed-120 mode. */
 	dcp->use_timestamps = mode->needs_timestamps && dcp->main_display;
+	vrr_on = crtc_state->vrr_enabled && dcp_vrr_allowed(dcp);
 
 	cookie = kzalloc(sizeof(*cookie), GFP_KERNEL);
 	if (!cookie) {
@@ -4111,7 +4113,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 #if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
 	if ((ret = dcp_peer_modeset_v27(dcp, mode->timing_mode_id,
 				      mode->color_mode_id,
-				      crtc_state->vrr_enabled && mode->vrr ? mode->min_vrr : 0)) != -EOPNOTSUPP) {
+				      vrr_on && mode->vrr ? mode->min_vrr : 0)) != -EOPNOTSUPP) {
 		cookie->status = ret;
 		paired = true;
 		if (!ret)
@@ -4127,9 +4129,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	if (mode->vrr &&
 		   dcp->hw.iomfb_method_profile !=
 		   DCP_IOMFB_METHODS_H17P_EXTERNAL)
-		dcp_set_adaptive_sync(dcp,
-				      crtc_state->vrr_enabled ? mode->min_vrr : 0,
-				      cookie);
+		dcp_set_adaptive_sync(dcp, vrr_on ? mode->min_vrr : 0, cookie);
 	else
 		dcp_set_digital_out_mode(dcp, false, &dcp->mode,
 					 complete_set_digital_out_mode, cookie);
@@ -4183,7 +4183,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 				 READ_ONCE(cookie->status));
 	}
 	kref_put(&cookie->refcount, release_wait_cookie);
-	dcp->vrr_enabled = mode->vrr && crtc_state->vrr_enabled;
+	dcp->vrr_enabled = mode->vrr && vrr_on;
 	/* A firmware 27 pair took them on both engines (dcp_peer_finish_v27()). */
 	if (dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17P_EXTERNAL ||
 	    (dcp->fw_compat == DCP_FIRMWARE_V_27_0 && !dcp_has_panel(dcp) && !paired))

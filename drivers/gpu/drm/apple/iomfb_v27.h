@@ -89,8 +89,46 @@ static_assert(offsetof(struct dcp_swap_v27, bl_limit) == 0x376);
 static_assert(offsetof(struct dcp_swap_v27, edr_scale) == 0x37e);
 static_assert(offsetof(struct dcp_swap_v27, edr_headroom) == 0x3e6);
 
+/*
+ * Firmware 27.3 grew IOMFBSwap from 0x6e0 to 0x830 bytes, so its swap_submit
+ * request is 0x150 bytes longer; the rest of the request is unchanged. Of the
+ * 27.2 swap fields, those from swap_id (0x98) up to 0x298 are 0x40 bytes
+ * further on, those from 0x2cc up to 0x534 0x60 bytes and those from 0x6b8 on
+ * 0x150 bytes, so the new bytes lie before swap_id, between 0x298 and 0x2cc
+ * and between 0x534 and 0x6b8. This driver sends zeros in all three ranges,
+ * so the 27.3 swap is the 27.2 one with that many zeros inserted at one point
+ * of each range. No swap of the macOS 27.3 driver has been traced yet, so a
+ * trace does not confirm this layout; the 27.3 firmware of a J716s takes the
+ * request and shows its frames.
+ */
+#define DCP_SWAP_V27_3_GAP0	0x098
+#define DCP_SWAP_V27_3_GAP0_LEN	0x40
+#define DCP_SWAP_V27_3_GAP1	0x2cc
+#define DCP_SWAP_V27_3_GAP1_LEN	0x20
+#define DCP_SWAP_V27_3_GAP2	0x6b8
+#define DCP_SWAP_V27_3_GAP2_LEN	0xf0
+#define DCP_SWAP_V27_3_SIZE	0x830
+
+struct dcp_swap_submit_req_v27_3 {
+	u8 swap[DCP_SWAP_V27_3_SIZE];
+	struct dcp_surface_v27 surf[SWAP_SURFACES];
+	u8 args[sizeof(struct dcp_swap_submit_req_v27) -
+		offsetof(struct dcp_swap_submit_req_v27, surf_iova)];
+} __packed;
+
+static_assert(sizeof(struct dcp_swap_v27) + DCP_SWAP_V27_3_GAP0_LEN +
+	      DCP_SWAP_V27_3_GAP1_LEN + DCP_SWAP_V27_3_GAP2_LEN ==
+	      DCP_SWAP_V27_3_SIZE);
+static_assert(sizeof(struct dcp_swap_submit_req_v27_3) == 0x1144);
+static_assert(offsetof(struct dcp_swap_submit_req_v27_3, surf) == 0x830);
+
 void iomfb_serialize_present_v27(struct dcp_swap_submit_req_v27 *wire,
 				const struct dcp_swap_submit_req_h17p *request);
+struct apple_dcp;
+bool iomfb_v27_swap_is_27_3(const struct apple_dcp *dcp);
+void *iomfb_v27_swap_wire(const struct apple_dcp *dcp,
+			  struct dcp_swap_submit_req_v27 *request,
+			  struct dcp_swap_submit_req_v27_3 *scratch, u32 *len);
 bool iomfb_v27_callback_size_valid(unsigned int tag, u32 input, u32 output);
 void iomfb_firmware_state_cleanup_v27(void *data);
 int iomfb_modeset_v27(struct apple_dcp *dcp, struct drm_crtc_state *state);

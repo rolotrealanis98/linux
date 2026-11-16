@@ -607,8 +607,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Woofer 1";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [00 0a 00 02];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [00 0f 00 02];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <2>;
 		ti,vmon-slot-no = <0>;
@@ -622,8 +622,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Woofer 2";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [02 0a 08 0a];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [02 0f 08 0a];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <10>;
 		ti,vmon-slot-no = <8>;
@@ -637,8 +637,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Left Tweeter";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [04 0a 10 12];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [04 0f 10 12];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <18>;
 		ti,vmon-slot-no = <16>;
@@ -664,8 +664,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Woofer 1";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [01 0a 04 06];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [01 0f 04 06];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <6>;
 		ti,vmon-slot-no = <4>;
@@ -679,8 +679,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Woofer 2";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [03 0a 0c 0e];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [03 0f 0c 0e];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <14>;
 		ti,vmon-slot-no = <12>;
@@ -694,8 +694,8 @@
 		apple,sdz-group-fail-closed;
 		#sound-dai-cells = <0>;
 		sound-name-prefix = "Right Tweeter";
-		/* ADT speaker-config row; this machine's boot loader does not copy it */
-		apple,speaker-config = [05 0a 14 16];
+		/* ADT speaker-config row, level 15 (18.5 dBV) as macOS runs it: speakerguardd v2 grants only at the tuning's own operating point */
+		apple,speaker-config = [05 0f 14 16];
 		interrupts-extended = <&pinctrl_ap 106 IRQ_TYPE_LEVEL_LOW>;
 		ti,imon-slot-no = <22>;
 		ti,vmon-slot-no = <20>;

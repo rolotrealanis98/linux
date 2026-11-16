@@ -1021,3 +1021,26 @@
 	snps,dis_enblslpm_quirk;
 	status = "okay";
 };
+
+/*
+ * No always-on usb-aon domains here. The ATC PHY's stop releases usb-aon and its next start
+ * powers it again; on this board, where no display crossbar holds the domain, that power cycle
+ * is what readies the PHY for USB3. Held on (64d473f5321d), the left-front port's SuperSpeed
+ * side never came up (Anker hub: its USB2 half enumerated, its USB3 half and the devices behind
+ * it did not), while the boots without it enumerate SuperSpeed Plus there.
+ */
+&ps_atc0_usb_aon {
+	/delete-property/ apple,always-on;
+};
+
+&ps_atc1_usb_aon {
+	/delete-property/ apple,always-on;
+};
+
+&ps_atc2_usb_aon {
+	/delete-property/ apple,always-on;
+};
+
+&ps_atc3_usb_aon {
+	/delete-property/ apple,always-on;
+};

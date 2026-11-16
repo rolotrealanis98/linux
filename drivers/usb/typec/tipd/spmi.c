@@ -907,6 +907,18 @@ static void sn201202x_remove(struct spmi_device *device)
 	spmi_command_sleep(sn->sdev);
 }
 
+/*
+ * Whether a polled controller is sent to SLEEP for a suspend to idle. Off, it
+ * stays awake through the sleep, as it is between polls: no attach wakes the
+ * system, and nothing about the connection is renegotiated at the resume. A
+ * switch to find out whether SLEEP and the wake are what lose a partner over
+ * an s2idle (J716s, left-front port).
+ */
+static bool s2idle_spmi_sleep = true;
+module_param(s2idle_spmi_sleep, bool, 0644);
+MODULE_PARM_DESC(s2idle_spmi_sleep,
+		 "Send a polled port controller to SLEEP for suspend-to-idle (default: on)");
+
 VISIBLE_IF_KUNIT int __maybe_unused sn201202x_resume(struct device *dev)
 {
 	struct tps6598x *tps = dev_get_drvdata(dev);
@@ -915,6 +927,10 @@ VISIBLE_IF_KUNIT int __maybe_unused sn201202x_resume(struct device *dev)
 
 	if (sn->sleep_only)
 		return sn201202x_sleep_only_state(sn, TPS_SYSTEM_POWER_STATE_S0);
+	if (sn->kept_awake) {
+		sn->kept_awake = false;
+		return tipd_resume(tps);
+	}
 	if (READ_ONCE(sn->sleep_watch)) {
 		/* Waits for a running sleep_event() */
 		disable_irq(tps->irq);
@@ -950,6 +966,12 @@ VISIBLE_IF_KUNIT int __maybe_unused sn201202x_suspend(struct device *dev)
 
 	if (sn->sleep_only)
 		return sn201202x_sleep_only_state(sn, TPS_SYSTEM_POWER_STATE_S3);
+	if (sn->polled && !READ_ONCE(s2idle_spmi_sleep) &&
+	    pm_suspend_target_state == PM_SUSPEND_TO_IDLE) {
+		err = tipd_suspend(tps);
+		sn->kept_awake = !err;
+		return err;
+	}
 	/*
 	 * A sleeping controller cannot be read, so its events must not be
 	 * handled until it is awake again. An interrupt arriving meanwhile is

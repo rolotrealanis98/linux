@@ -959,6 +959,14 @@ static void t6050_boot_writes_run(struct apple_sleep *s, unsigned int group, uns
 	struct apple_sleep_region_state *r = s->region;
 	unsigned int total = t6050_boot_writes_count(s, group), i;
 
+	/* A group the DT leaves empty (the J716s's CPM writes) is done as it stands. */
+	if (!total) {
+		if (group == r->boot_writes_next && !first)
+			count = 0;
+		else
+			return;
+		goto advance;
+	}
 	if (first >= total)
 		return;
 	count = min(count, total - first);
@@ -990,6 +998,7 @@ static void t6050_boot_writes_run(struct apple_sleep *s, unsigned int group, uns
 	}
 	dev_emerg(s->dev, "boot writes: %s %u..%u: done\n", t6050_bw_names[group], first,
 		  first + count - 1);
+advance:
 	/* A whole group, in order, moves the sequence on. */
 	if (group == r->boot_writes_next && first == 0 && count == total) {
 		r->boot_writes_next++;

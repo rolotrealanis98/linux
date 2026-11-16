@@ -626,6 +626,18 @@
 #include "t6050-j716s-sleep-adt.dtsi"
 
 /*
+ * No CPM boot writes on the J716s. They are XNU's writes to the clusters' CPM blocks (ADT
+ * cpm-impl-reg, 0x2_1[012]e40000), recorded at macOS boot on the J714s. On a running J716s the
+ * first alone (cluster 0, +0x8000 <- 0) stops the machine within about 10 s, with or without the
+ * clock-gating writes before it (deep-sleep-9 and its bisection). The sleep itself only reads
+ * the CPM counters at +0x8000/+0x8008, and the J714s sleep was recorded with those windows
+ * untrapped (aura sptm_virt_s2r.c: their accesses aren't needed for the sleep).
+ */
+&sleep {
+	/delete-property/ apple,cpm-boot;
+};
+
+/*
  * Sound through the AOP, as on J813 and the J714s: its audio service runs the serializers, the
  * CS42L84 headphone jack on admac-base-ns TX2/RX2 and the six SN012776 speaker amps
  * on TX0, their voltage and current sense on RX0 (ADT iop-audio-controller).

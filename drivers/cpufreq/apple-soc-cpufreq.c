@@ -220,6 +220,19 @@ struct apple_soc_cpufreq_info {
 	u64 ps1_shift;
 };
 
+/* Reasons an idle entry leaves its cluster as it is, counted for park_stats. */
+enum {
+	APPLE_PARK_SKIP_OFF,		/* idle_park off, or already parked */
+	APPLE_PARK_SKIP_WAITED,		/* waited-for requests own the cluster */
+	APPLE_PARK_SKIP_FAILED,		/* a transition failed */
+	APPLE_PARK_SKIP_PENDING,	/* a request is pending */
+	APPLE_PARK_SKIP_LOWEST,		/* already at the slowest state */
+	APPLE_PARK_SKIP_AWAKE,		/* another CPU of the cluster is not in a parking state */
+	APPLE_PARK_SKIP_BUSY,		/* a transition is running */
+	APPLE_PARK_SKIP_MISMATCH,	/* the accepted state is not the last request */
+	APPLE_PARK_SKIPS
+};
+
 struct apple_cpu_priv {
 	struct apple_fast_die *fast_die;
 	struct device *cpu_dev;
@@ -270,9 +283,12 @@ struct apple_cpu_priv {
 	u64 park_count;
 	u64 park_ns;
 	u64 park_since;
+	/* Why an idle entry did not park, see apple_soc_cpufreq_park_enter(). */
+	u64 park_skip[APPLE_PARK_SKIPS];
 };
 
 /* The cluster of each CPU whose cluster can be parked, or NULL. */
+
 static DEFINE_PER_CPU(struct apple_cpu_priv *, apple_park_priv);
 
 static struct cpufreq_driver apple_soc_cpufreq_driver;
@@ -618,6 +634,7 @@ static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 	struct apple_cpu_priv *priv = READ_ONCE(per_cpu(apple_park_priv, cpu));
 	unsigned long flags;
 	unsigned int c;
+	int skip;
 	u64 reg;
 
 	if (!priv)
@@ -625,25 +642,33 @@ static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 
 	raw_spin_lock_irqsave(&priv->lock, flags);
 	cpumask_set_cpu(cpu, &priv->park_idle);
+	skip = APPLE_PARK_SKIP_OFF;
 	if (priv->parked || !READ_ONCE(idle_park))
 		goto out;
 	if (priv->info->lazy_verify) {
-		if (priv->waited || priv->transition_failed || priv->pending_pstate >= 0)
+		skip = priv->waited ? APPLE_PARK_SKIP_WAITED :
+		       priv->transition_failed ? APPLE_PARK_SKIP_FAILED :
+		       priv->pending_pstate >= 0 ? APPLE_PARK_SKIP_PENDING : -1;
+		if (skip >= 0)
 			goto out;
 		priv->park_wanted = priv->expected_pstate;
 	}
+	skip = APPLE_PARK_SKIP_LOWEST;
 	if (priv->park_wanted <= priv->park_pstate)
 		goto out;
+	skip = APPLE_PARK_SKIP_AWAKE;
 	for_each_cpu_and(c, &priv->park_cpus, cpu_online_mask)
 		if (!cpumask_test_cpu(c, &priv->park_idle))
 			goto out;
 
 	/* A transition still running: leave the cluster as it is this time. */
+	skip = APPLE_PARK_SKIP_BUSY;
 	reg = readq_relaxed(priv->reg_base + APPLE_DVFS_CMD);
 	if (reg & APPLE_DVFS_CMD_BUSY)
 		goto out;
 	if (priv->info->lazy_verify) {
 		/* Not what was last requested: the verify timer reports it. */
+		skip = APPLE_PARK_SKIP_MISMATCH;
 		if (FIELD_GET(APPLE_DVFS_CMD_PS1, reg) != priv->expected_pstate)
 			goto out;
 		priv->expected_pstate = priv->park_pstate;
@@ -655,7 +680,10 @@ static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 	priv->parked = true;
 	priv->park_count++;
 	priv->park_since = ktime_get_mono_fast_ns();
+	skip = -1;
 out:
+	if (skip >= 0)
+		priv->park_skip[skip]++;
 	raw_spin_unlock_irqrestore(&priv->lock, flags);
 }
 
@@ -1805,18 +1833,24 @@ static int apple_soc_cpufreq_offline(struct cpufreq_policy *policy)
 static ssize_t show_park_stats(struct cpufreq_policy *policy, char *buf)
 {
 	struct apple_cpu_priv *priv = policy->driver_data;
+	u64 count, ns, skip[APPLE_PARK_SKIPS];
 	unsigned long flags;
-	u64 count, ns;
 
 	if (!priv || !priv->park)
 		return sysfs_emit(buf, "unsupported\n");
 	raw_spin_lock_irqsave(&priv->lock, flags);
 	count = priv->park_count;
 	ns = priv->park_ns;
+	memcpy(skip, priv->park_skip, sizeof(skip));
 	if (priv->parked)
 		ns += ktime_get_mono_fast_ns() - priv->park_since;
 	raw_spin_unlock_irqrestore(&priv->lock, flags);
-	return sysfs_emit(buf, "parks %llu parked_ms %llu\n", count, div_u64(ns, NSEC_PER_MSEC));
+	return sysfs_emit(buf, "parks %llu parked_ms %llu skip off %llu waited %llu failed %llu pending %llu lowest %llu awake %llu busy %llu mismatch %llu\n",
+			  count, div_u64(ns, NSEC_PER_MSEC),
+			  skip[APPLE_PARK_SKIP_OFF], skip[APPLE_PARK_SKIP_WAITED],
+			  skip[APPLE_PARK_SKIP_FAILED], skip[APPLE_PARK_SKIP_PENDING],
+			  skip[APPLE_PARK_SKIP_LOWEST], skip[APPLE_PARK_SKIP_AWAKE],
+			  skip[APPLE_PARK_SKIP_BUSY], skip[APPLE_PARK_SKIP_MISMATCH]);
 }
 cpufreq_freq_attr_ro(park_stats);
 

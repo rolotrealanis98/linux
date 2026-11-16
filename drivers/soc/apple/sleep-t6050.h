@@ -165,6 +165,10 @@ struct apple_sleep_region_state {
 	/* From the DT: the boot set-up written to them at probe */
 	u64 *cpm_boot;
 	unsigned int ncpm_boot;
+	/* Every group of the probe-time writes has run, in order (t6050_boot_writes) */
+	bool boot_writes_done;
+	struct mutex boot_writes_lock;
+	u8 boot_writes_next;
 	/* The AP wake-enable words, on this die and the GFX die */
 	void __iomem *wake, *wake_gfx, *aic_gfx;
 	u32 wake_enabled[11], wake_saved[11];
@@ -856,7 +860,15 @@ static unsigned long *sleep_region_domain_bitmap(struct apple_sleep *s, u32 word
  * The one-time clock-gating set-up of the PMGR's clock pages, where the boot loader puts it
  * (apple,clk-gating-boot: reg index, offset, value). Without it the pages keep iBoot's values.
  */
-static void t6050_boot_clk_gating(struct apple_sleep *s)
+static unsigned int t6050_boot_clk_gating_count(struct apple_sleep *s)
+{
+	int n = of_property_count_u32_elems(s->dev->of_node, "apple,clk-gating-boot");
+
+	return n > 0 && !(n % 3) ? n / 3 : 0;
+}
+
+/* Writes first .. first + count - 1 of apple,clk-gating-boot. */
+static void t6050_boot_clk_gating(struct apple_sleep *s, unsigned int first, unsigned int count)
 {
 	struct device_node *np = s->dev->of_node;
 	int n = of_property_count_u32_elems(np, "apple,clk-gating-boot");
@@ -871,6 +883,9 @@ static void t6050_boot_clk_gating(struct apple_sleep *s)
 		dev_warn(s->dev, "apple,clk-gating-boot is not in threes\n");
 		return;
 	}
+	if (first >= n / 3)
+		return;
+	count = min(count, n / 3 - first);
 	for (i = 0; i < ARRAY_SIZE(base); i++) {
 		const char *name;
 		struct resource res;
@@ -886,7 +901,7 @@ static void t6050_boot_clk_gating(struct apple_sleep *s)
 	}
 	w = kcalloc(n, sizeof(*w), GFP_KERNEL);
 	if (w && !of_property_read_u32_array(np, "apple,clk-gating-boot", w, n)) {
-		for (i = 0; i < n; i += 3) {
+		for (i = 3 * first; i < 3 * (first + count); i += 3) {
 			if (w[i] >= ARRAY_SIZE(base) || !base[w[i]] || w[i + 1] % 4 ||
 			    w[i + 1] + 4 > size[w[i]]) {
 				bad++;
@@ -906,28 +921,171 @@ static void t6050_boot_clk_gating(struct apple_sleep *s)
 static int t6050_cpm_prop(struct apple_sleep *s, const char *name, u64 **ops, unsigned int *n);
 static void t6050_seq(struct apple_sleep *s, unsigned int seq);
 
-static void t6050_sleep_boot_auto(struct apple_sleep *s)
+/*
+ * The probe-time writes run only with apple_sleep.t6050_boot_writes=1. They are the J714s's
+ * values; a J716s boot that ran them (with a new boot object) hung before userspace with
+ * nothing on record. Without them deep sleep is not offered that boot. To find a write that
+ * hangs, debugfs apple_sleep/t6050_boot_writes runs them from userspace, a group or a range at
+ * a time, each announced at KERN_EMERG before it runs: "clk FIRST COUNT", "cpm FIRST COUNT",
+ * "seq FIRST COUNT", or "all"; reading it gives each group's size. Deep sleep stays off for a
+ * boot whose writes ran that way.
+ */
+static bool t6050_boot_writes;
+module_param(t6050_boot_writes, bool, 0444);
+MODULE_PARM_DESC(t6050_boot_writes,
+		 "T6050: run the DT's clock-gating, CPM and boot-sequence writes at probe (0: skip them, no deep sleep)");
+
+enum { T6050_BW_CLK, T6050_BW_CPM, T6050_BW_SEQ, T6050_BW_GROUPS };
+static const char *const t6050_bw_names[T6050_BW_GROUPS] = { "clk", "cpm", "seq" };
+
+static unsigned int t6050_boot_writes_count(struct apple_sleep *s, unsigned int group)
 {
 	struct apple_sleep_region_state *r = s->region;
-	unsigned int i;
 
-	/* The clock-gating set-up comes first, before the fabric words go on auto. */
-	t6050_boot_clk_gating(s);
-	for (i = 0; i < r->ncpm_boot; i++) {
-		const u64 *w = &r->cpm_boot[3 * i];
-
-		if (w[0] < ARRAY_SIZE(r->cpm) && r->cpm[w[0]])
-			writeq(w[2], r->cpm[w[0]] + w[1]);
+	switch (group) {
+	case T6050_BW_CLK:
+		return t6050_boot_clk_gating_count(s);
+	case T6050_BW_CPM:
+		return r->ncpm_boot;
+	default:
+		return r->seq[T6050_SEQ_BOOT].n;
 	}
+}
+
+/* Runs entries first .. first + count - 1 of one group, announced at KERN_EMERG first. */
+static void t6050_boot_writes_run(struct apple_sleep *s, unsigned int group, unsigned int first,
+				  unsigned int count)
+{
+	struct apple_sleep_region_state *r = s->region;
+	unsigned int total = t6050_boot_writes_count(s, group), i;
+
+	if (first >= total)
+		return;
+	count = min(count, total - first);
+	dev_emerg(s->dev, "boot writes: %s %u..%u of %u: starting\n", t6050_bw_names[group], first,
+		  first + count - 1, total);
+	switch (group) {
+	case T6050_BW_CLK:
+		t6050_boot_clk_gating(s, first, count);
+		break;
+	case T6050_BW_CPM:
+		for (i = first; i < first + count; i++) {
+			const u64 *w = &r->cpm_boot[3 * i];
+
+			if (w[0] < ARRAY_SIZE(r->cpm) && r->cpm[w[0]])
+				writeq(w[2], r->cpm[w[0]] + w[1]);
+		}
+		break;
+	default: {
+		struct t6050_ops part = {
+			.op = r->seq[T6050_SEQ_BOOT].op + 4 * first,
+			.n = count,
+		};
+
+		i = t6050_ops_run(s, &part);
+		if (i)
+			dev_warn(s->dev, "boot writes: seq: %u waits timed out\n", i);
+		break;
+	}
+	}
+	dev_emerg(s->dev, "boot writes: %s %u..%u: done\n", t6050_bw_names[group], first,
+		  first + count - 1);
+	/* A whole group, in order, moves the sequence on. */
+	if (group == r->boot_writes_next && first == 0 && count == total) {
+		r->boot_writes_next++;
+		if (r->boot_writes_next == T6050_BW_GROUPS) {
+			/* nub-spmi0's mask through each runtime PMU command: the DT's, or what boot left */
+			if (!r->spmi_runtime_mask)
+				r->spmi_runtime_mask = readl(s->spmi + M5_SPMI_IRQ_EN);
+			r->boot_writes_done = true;
+		}
+	} else if (count) {
+		r->boot_writes_next = T6050_BW_GROUPS + 1;
+	}
+}
+
+static void t6050_boot_writes_all(struct apple_sleep *s)
+{
+	unsigned int g;
+
 	/*
-	 * The DT's boot sequence: the fabric and memory power words put under automatic power
-	 * (iBoot leaves them on with AUTO_ENABLE clear, so none can gate), and the SPMI buses'
-	 * interrupt masks and nub-spmi0's event sources.
+	 * The clock-gating set-up comes first, before the fabric words go on auto. Then the
+	 * clusters' CPM set-up, and the DT's boot sequence: the fabric and memory power words put
+	 * under automatic power (iBoot leaves them on with AUTO_ENABLE clear, so none can gate),
+	 * and the SPMI buses' interrupt masks and nub-spmi0's event sources.
 	 */
-	t6050_seq(s, T6050_SEQ_BOOT);
-	/* nub-spmi0's mask through each runtime PMU command: the DT's, or what boot left */
-	if (!r->spmi_runtime_mask)
-		r->spmi_runtime_mask = readl(s->spmi + M5_SPMI_IRQ_EN);
+	for (g = 0; g < T6050_BW_GROUPS; g++)
+		t6050_boot_writes_run(s, g, 0, t6050_boot_writes_count(s, g));
+}
+
+static ssize_t t6050_boot_writes_write(struct file *file, const char __user *ubuf, size_t len,
+				       loff_t *ppos)
+{
+	struct apple_sleep *s = file->private_data;
+	struct apple_sleep_region_state *r = s->region;
+	unsigned int g, first = 0, count = UINT_MAX;
+	char buf[48], name[8];
+	int n;
+
+	if (len >= sizeof(buf))
+		return -EINVAL;
+	if (copy_from_user(buf, ubuf, len))
+		return -EFAULT;
+	buf[len] = 0;
+	n = sscanf(buf, "%7s %u %u", name, &first, &count);
+	if (n < 1)
+		return -EINVAL;
+	guard(mutex)(&r->boot_writes_lock);
+	if (!strcmp(name, "all")) {
+		t6050_boot_writes_all(s);
+		return len;
+	}
+	for (g = 0; g < T6050_BW_GROUPS; g++)
+		if (!strcmp(name, t6050_bw_names[g]))
+			break;
+	if (g == T6050_BW_GROUPS)
+		return -EINVAL;
+	t6050_boot_writes_run(s, g, first, count);
+	return len;
+}
+
+static int t6050_boot_writes_show(struct seq_file *m, void *unused)
+{
+	struct apple_sleep *s = m->private;
+	unsigned int g;
+
+	for (g = 0; g < T6050_BW_GROUPS; g++)
+		seq_printf(m, "%s %u\n", t6050_bw_names[g], t6050_boot_writes_count(s, g));
+	seq_printf(m, "done %d next %u\n", s->region->boot_writes_done, s->region->boot_writes_next);
+	return 0;
+}
+
+static int t6050_boot_writes_open(struct inode *inode, struct file *file)
+{
+	int ret = single_open(file, t6050_boot_writes_show, inode->i_private);
+
+	if (!ret)
+		file->private_data = inode->i_private;
+	return ret;
+}
+
+static const struct file_operations t6050_boot_writes_fops = {
+	.owner = THIS_MODULE,
+	.open = t6050_boot_writes_open,
+	.read = seq_read,
+	.llseek = seq_lseek,
+	.release = single_release,
+	.write = t6050_boot_writes_write,
+};
+
+static void t6050_sleep_boot_auto(struct apple_sleep *s)
+{
+	mutex_init(&s->region->boot_writes_lock);
+	if (!t6050_boot_writes) {
+		dev_info(s->dev, "boot writes skipped (apple_sleep.t6050_boot_writes=0): no deep sleep this boot\n");
+		return;
+	}
+	t6050_boot_writes_all(s);
 }
 
 /* A block an op names: the radio's and the PHY's, an SPMI bus, or one of this node's reg entries */
@@ -1587,12 +1745,25 @@ static void t6050_sleep_pins_low(struct apple_sleep *s)
 		t6050_pin_low(r->ap_gpio + 4 * r->pins_low[i]);
 }
 
+/* After a successful probe: s lives as long as the driver, so the debugfs file can take it. */
+static bool t6050_sleep_deep_ready(struct apple_sleep *s)
+{
+	struct dentry *dir = debugfs_create_dir("apple_sleep", NULL);
+
+	debugfs_create_file("t6050_boot_writes", 0600, dir, s, &t6050_boot_writes_fops);
+	return s->region->boot_writes_done;
+}
+
 static int t6050_sleep_begin(struct apple_sleep *s)
 {
 	struct apple_sleep_region_state *r = s->region;
 	unsigned int i;
 	int ret;
 
+	if (!r->boot_writes_done) {
+		dev_err(s->dev, "refused: the probe-time writes have not all run\n");
+		return -EBUSY;
+	}
 	t6050_sleep_pins_low(s);
 	r->n1_up_ret = 0;
 	r->n1_host = t6050_n1_host_bound(s);
@@ -3354,6 +3525,7 @@ static const struct apple_sleep_ops t6050_sleep_ops = {
 	.aic_restore = aic_sleep_restore,
 	.plan_complex_request = t6050_sleep_plan_complex_request,
 	.map_regs = t6050_sleep_map_regs,
+	.deep_ready = t6050_sleep_deep_ready,
 	.begin = t6050_sleep_begin,
 	.check = t6050_sleep_check_alarm,
 	.display_off = t6050_sleep_display_prepare,

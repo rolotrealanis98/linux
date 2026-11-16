@@ -43,6 +43,9 @@
 #include <linux/soc/apple/pmp-report.h>
 #include <linux/cpu.h>
 #include <linux/cpumask.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
+#include <linux/uaccess.h>
 #include <linux/completion.h>
 #include <linux/delay.h>
 #include <linux/device.h>
@@ -492,6 +495,8 @@ struct apple_sleep_ops {
 
 	/* Optional: the SoC's own register map, in place of the common one */
 	int (*map_regs)(struct apple_sleep *s);
+	/* Optional: false leaves deep sleep unoffered after a successful probe */
+	bool (*deep_ready)(struct apple_sleep *s);
 	int (*begin)(struct apple_sleep *s);
 	int (*stage)(struct apple_sleep *s);
 	int (*final_check)(struct apple_sleep *s);
@@ -5208,6 +5213,11 @@ static int apple_sleep_probe(struct platform_device *pdev)
 
 	/* Last: the exported helpers take it as a probed driver, and a failure frees s. */
 	apple_sleep = s;
+	if (s->soc->ops->deep_ready && !s->soc->ops->deep_ready(s)) {
+		dev_info(dev, "deep sleep not offered: boot object resumes %llu\n",
+			 READ_ONCE(s->mbox->resumes));
+		return 0;
+	}
 	/* Deep becomes the default sleep state, unless mem_sleep_default= chose another. */
 	suspend_set_ops(s->soc->early_context ? &apple_sleep_early_ops : &apple_sleep_ops);
 

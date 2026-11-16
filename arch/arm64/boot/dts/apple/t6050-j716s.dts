@@ -1009,8 +1009,30 @@
 	};
 };
 
+/*
+ * The display coprocessor's secure mailbox (secure RTBuddy proxy). On firmware 27.2 the K116s's
+ * internal DCP acknowledges no IOP idle until this port, handshaken at bind, has been AP-idled
+ * between the main mailbox's AP and IOP idle (aurora-silicon/linux#2075). The K116s's ADT
+ * describes it as /arm-io/dcp-exclave-mailbox at 0x4cae7c000; the J716s's does not (neither
+ * the boot loader's ADT nor the macOS 27.3 registry has a node for it; its one secure RTBuddy
+ * proxy is the AOP's, aop_setup_mbox). The address is the same SoC's, the DCP's +0x4007c000
+ * as on the T8140, so this node is a guess until a J716s answers on it.
+ *
+ * Probing it only maps the page. It is named outside mboxes, as the boot loader hands the
+ * display over only to a node whose mboxes is the one ASC mailbox; the display driver adds it
+ * to the live node, and touches it, only with appledrm.j716s_sleep=3.
+ */
+&{/soc@200000000} {
+	dcp_secure_mbox: mailbox@4cae7c000 {
+		compatible = "apple,t6050-secure-rtbuddy-proxy", "apple,secure-rtbuddy-proxy";
+		reg = <0x4 0xcae7c000 0x0 0x4000>;
+		#mbox-cells = <0>;
+	};
+};
+
 &dcp {
 	apple,dcp-index = <0>;
+	apple,secure-mbox = <&dcp_secure_mbox>;
 	apple,bw-scratch = <&dcpext0_pmc 0 5 0x20000>;
 	apple,clock-ids = <361 458>;
 	clocks = <&dcp_fw_clk361>, <&dcp_fw_clk458>;

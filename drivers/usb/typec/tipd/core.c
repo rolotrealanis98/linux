@@ -3298,6 +3298,9 @@ static int cd321x_remove(struct tps6598x *tps)
  * controller key is the reversed target identifier.
  *
  * J716c: the boot port keeps a USB2 repeater connection.
+ * J716s: the same boot port (left-back, the boot loader's USB2 gadget port),
+ * when the board describes it as a host port; best effort, so a failure leaves
+ * the port as it was instead of losing its controller.
  * J575c: a connection that was up before Linux keeps its Type-C retimer set up
  * from before the host PHY ran, so SuperSpeed stays in RxDetect until the
  * partner is replugged. Byte 7 of register 0x7e has bit 3 set once the
@@ -3319,6 +3322,8 @@ struct cd321x_inherited_board {
 
 static const struct cd321x_inherited_board cd321x_inherited_boards[] = {
 	{ .compatible = "apple,j716c", .key = { '6', '1', '7', 'J' } },
+	{ .compatible = "apple,j716s", .key = { '6', '1', '7', 'J' },
+	  .best_effort = true },
 	{ .compatible = "apple,j575c", .key = { '5', '7', '5', 'J' },
 	  .check_attach_state = true, .best_effort = true },
 };

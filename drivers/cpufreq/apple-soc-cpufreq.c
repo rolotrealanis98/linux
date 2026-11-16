@@ -266,6 +266,10 @@ struct apple_cpu_priv {
 	unsigned int park_wanted;
 	struct cpumask park_cpus;
 	struct cpumask park_idle;
+	/* Times parked, and the time spent so, for park_stats; under @lock. */
+	u64 park_count;
+	u64 park_ns;
+	u64 park_since;
 };
 
 /* The cluster of each CPU whose cluster can be parked, or NULL. */
@@ -560,6 +564,8 @@ static int apple_soc_cpufreq_request(struct cpufreq_policy *policy,
 	if (priv->parked && !priv->info->lazy_verify) {
 		ret = 0;
 	} else {
+		if (priv->parked)
+			priv->park_ns += ktime_get_mono_fast_ns() - priv->park_since;
 		priv->parked = false;
 		ret = apple_soc_cpufreq_set_pstate(priv, pstate);
 	}
@@ -647,6 +653,8 @@ static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 	}
 	apple_soc_cpufreq_write(priv, reg, priv->park_pstate);
 	priv->parked = true;
+	priv->park_count++;
+	priv->park_since = ktime_get_mono_fast_ns();
 out:
 	raw_spin_unlock_irqrestore(&priv->lock, flags);
 }
@@ -663,6 +671,7 @@ static void apple_soc_cpufreq_park_exit(unsigned int cpu)
 	cpumask_clear_cpu(cpu, &priv->park_idle);
 	if (priv->parked) {
 		priv->parked = false;
+		priv->park_ns += ktime_get_mono_fast_ns() - priv->park_since;
 		if (priv->info->lazy_verify)
 			apple_soc_cpufreq_lazy_set(priv, priv->park_wanted);
 		else
@@ -1792,8 +1801,33 @@ static int apple_soc_cpufreq_offline(struct cpufreq_policy *policy)
 	return 0;
 }
 
+/* How often the cluster was parked and for how long, see "Idle parking". */
+static ssize_t show_park_stats(struct cpufreq_policy *policy, char *buf)
+{
+	struct apple_cpu_priv *priv = policy->driver_data;
+	unsigned long flags;
+	u64 count, ns;
+
+	if (!priv || !priv->park)
+		return sysfs_emit(buf, "unsupported\n");
+	raw_spin_lock_irqsave(&priv->lock, flags);
+	count = priv->park_count;
+	ns = priv->park_ns;
+	if (priv->parked)
+		ns += ktime_get_mono_fast_ns() - priv->park_since;
+	raw_spin_unlock_irqrestore(&priv->lock, flags);
+	return sysfs_emit(buf, "parks %llu parked_ms %llu\n", count, div_u64(ns, NSEC_PER_MSEC));
+}
+cpufreq_freq_attr_ro(park_stats);
+
+static struct freq_attr *apple_soc_cpufreq_attrs[] = {
+	&park_stats,
+	NULL,
+};
+
 static struct cpufreq_driver apple_soc_cpufreq_driver = {
 	.name		= "apple-cpufreq",
+	.attr		= apple_soc_cpufreq_attrs,
 	.flags		= CPUFREQ_HAVE_GOVERNOR_PER_POLICY |
 			  CPUFREQ_NEED_INITIAL_FREQ_CHECK | CPUFREQ_IS_COOLING_DEV,
 	.verify		= cpufreq_generic_frequency_table_verify,

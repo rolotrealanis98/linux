@@ -4130,6 +4130,20 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	keep_mode = dcp->v27_sleep_eps && xchg(&dcp->v27_keep_mode, false) &&
 		    dcp->mode.color_mode_id == mode->color_mode_id &&
 		    dcp->mode.timing_mode_id == mode->timing_mode_id;
+	if (keep_mode && READ_ONCE(v27_wake_modeset)) {
+		unsigned int waited = 0;
+
+		while (READ_ONCE(dcp->panel_video_opens) == dcp->panel_video_opens_wake &&
+		       waited < 1500) {
+			msleep(5);
+			waited += 5;
+		}
+		/* The firmware's next round of reports (hotplug with a valid mode) follows the open */
+		msleep(40);
+		dev_dbg(dcp->dev, "V27 wake: mode set sent, %u ms after waiting for the panel's video interface (%s)\n",
+			 waited, waited < 1500 ? "opened" : "not opened");
+		keep_mode = false;
+	}
 #endif
 	dcp->mode = (struct dcp_set_digital_out_mode_req){
 		.color_mode_id = mode->color_mode_id,

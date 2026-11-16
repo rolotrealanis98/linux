@@ -448,6 +448,15 @@ int fw27_panel_boot_mode = -1;
 module_param(fw27_panel_boot_mode, int, 0644);
 MODULE_PARM_DESC(fw27_panel_boot_mode,
 		 "FW27 internal panel: -1 keep the boot mode for a single fixed timing (default), 0 always mode-set, 1 always keep the boot mode");
+/*
+ * After a V27 sleep the first mode set of the panel waits for its video interface to be opened
+ * again (up to 1.5 s) and is then sent for real, in place of keeping the mode. From the K116s
+ * (27.2) bring-up; whether it is needed there is not established.
+ */
+int v27_wake_modeset = 1;
+module_param(v27_wake_modeset, int, 0644);
+MODULE_PARM_DESC(v27_wake_modeset,
+		 "V27 wake: 1 (default) send the panel's first mode set once its video interface is open again, 0 keep the mode");
 
 /*
  * update_notify_clients_dcp (A031 on H17P, A033 on H17G) form in the H17

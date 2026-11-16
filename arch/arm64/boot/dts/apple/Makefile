@@ -105,6 +105,7 @@ dtb-$(CONFIG_ARCH_APPLE) += t6050-j714c.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j714s.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j716c.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j716s.dtb
+dtb-$(CONFIG_ARCH_APPLE) += t6050-j716s-atc0-host.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j775c.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j775d.dtb
 dtb-$(CONFIG_ARCH_APPLE) += t6050-j873s.dtb

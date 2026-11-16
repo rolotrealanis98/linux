@@ -591,9 +591,22 @@
  * Deep sleep, as described for the J714s: the same SoC blocks, the same port controllers
  * (hpm1, hpm2, hpm5) and the N1's warm reset with the same SMC key and value (ADT
  * pci-bridge0 function-warm_reset 'bpli' 0x1000000, read from this machine's macOS 27.3
- * device tree). Deep sleep stays off until the boot loader adds the SoC's sleep data.
+ * device tree).
  */
 #include "t6050-j714s-sleep.dtsi"
+
+/*
+ * The deep sleep's SoC data, as on the J714s, until the boot loader hands it over. The J716s is
+ * the same SoC: the PMGR power, clock, perf and table words, the clusters' CPM writes, the
+ * commit window's register sequences, the PTD, PMU and SPMI values and the DARTs' GAPF slices
+ * are the SoC's. The commit schedule, the SMC's spacings and the coprocessors' firmware values
+ * (AOP and AOP2 endpoint orders, the PMP's SRAM and PTD boot entries, the display calls'
+ * arguments, ANS's wake delay) are macOS's on the J714s and have not been measured on this
+ * machine. Its codec reset (apple,sleep-low-pins) is AP pin 139, as on the J714s. The skipped
+ * pins and wake sources are this machine's ADT values (identical to the J714s's).
+ */
+#include "t6050-j714s-sleep-soc.dtsi"
+#include "t6050-j716s-sleep-adt.dtsi"
 
 /*
  * Sound through the AOP, as on J813 and the J714s: its audio service runs the serializers, the

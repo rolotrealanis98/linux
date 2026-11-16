@@ -921,6 +921,8 @@ struct apple_dcp {
 
 	/* V27 sleep: the panel's next mode set is the mode it already has */
 	bool v27_keep_mode;
+	/* Opens of the panel's video interface, and their count at the wake */
+	unsigned int panel_video_opens, panel_video_opens_wake;
 	/* V27 sleep: the output area of the call being pushed holds this (an in/out word) */
 	const void *push_out_prefill;
 
@@ -1226,6 +1228,7 @@ int dcp_backlight_update(struct apple_dcp *dcp);
 s32 dcp_ext_backlight_value(struct apple_dcp *dcp);
 bool dcp_has_panel(struct apple_dcp *dcp);
 extern int fw27_panel_boot_mode;
+extern int v27_wake_modeset;
 extern int notify_clients_form;
 
 /*

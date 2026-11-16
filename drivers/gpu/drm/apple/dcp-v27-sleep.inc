@@ -1293,6 +1293,7 @@ static int dcp_v27_reopen_live(struct apple_dcp *dcp)
 					return ret;
 				s->soft_off = false;
 			}
+			dcp->panel_video_opens_wake = READ_ONCE(dcp->panel_video_opens);
 			WRITE_ONCE(dcp->v27_keep_mode, true);
 		} else if (s->ext_wake) {
 			ret = dcp_v27_ext_wake_calls(s);

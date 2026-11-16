@@ -285,6 +285,59 @@ static int dcp_secure_port_init(struct apple_dcp *dcp)
 }
 
 /*
+ * A secure mailbox named by apple,secure-mbox instead of mboxes (J716s): the boot loader hands
+ * the display over only to a node whose mboxes is the one ASC mailbox. Added to the live
+ * node's mboxes as "secure", for dcp_secure_port_init(). The properties are never freed: the
+ * node keeps pointers to replaced ones.
+ */
+static int __maybe_unused dcp_secure_port_name(struct apple_dcp *dcp)
+{
+	static const char names[] = "mbox\0secure";
+	struct device_node *np = dcp->dev->of_node;
+	struct property *boxes, *nm;
+	const __be32 *main_box, *sec;
+	__be32 *v;
+	int len, ret;
+
+	if (of_property_match_string(np, "mbox-names", "secure") >= 0)
+		return 0;
+	main_box = of_get_property(np, "mboxes", &len);
+	sec = of_get_property(np, "apple,secure-mbox", NULL);
+	if (!main_box || len != sizeof(*main_box) || !sec)
+		return -ENODEV;
+
+	boxes = kzalloc(sizeof(*boxes), GFP_KERNEL);
+	nm = kzalloc(sizeof(*nm), GFP_KERNEL);
+	v = kcalloc(2, sizeof(*v), GFP_KERNEL);
+	if (!boxes || !nm || !v) {
+		kfree(boxes);
+		kfree(nm);
+		kfree(v);
+		return -ENOMEM;
+	}
+	v[0] = main_box[0];
+	v[1] = sec[0];
+	boxes->name = "mboxes";
+	boxes->value = v;
+	boxes->length = 2 * sizeof(*v);
+	nm->name = "mbox-names";
+	nm->value = (void *)names;
+	nm->length = sizeof(names);
+
+	ret = of_update_property(np, boxes);
+	if (ret) {
+		kfree(boxes);
+		kfree(nm);
+		kfree(v);
+		return ret;
+	}
+	return of_update_property(np, nm);
+}
+
+/* J716s on 27.3 (dcp-v27-sleep.inc). */
+static void dcp_v27_secure_bind(struct apple_dcp *dcp);
+
+/*
  * Stopping the firmware (DPMS off and system sleep with hw.s2r or hw.s2r_ext) powers the
  * display domains through apple,display-power, and the internal DCP only takes IOP idle
  * once its secure port has gone idle. A device tree without those keeps the firmware
@@ -6109,6 +6162,8 @@ static int dcp_comp_bind_pipe(struct device *dev, struct device *main, void *dat
 	ret = dcp_secure_port_init(dcp);
 	if (ret)
 		goto err_piodma;
+	/* J716s: its secure port with appledrm.j716s_sleep=3 on the command line; never fatal. */
+	dcp_v27_secure_bind(dcp);
 
 	if (dcp->hw.adopt_live_session)
 		dev_dbg(dev, "negotiating RTKit with the running DCP\n");

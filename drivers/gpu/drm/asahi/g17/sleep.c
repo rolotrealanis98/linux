@@ -20,6 +20,7 @@
 #include <linux/soc/apple/pmp-report.h>
 #include <linux/soc/apple/rtkit.h>
 #include <linux/soc/apple/sleep.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "sleep.h"
 
@@ -50,7 +51,7 @@
  */
 static bool asahi_g17_m5_provider(struct device *dev)
 {
-	return of_machine_is_compatible("apple,j714s") &&
+	return apple_t6050_sleep_board() &&
 	       of_machine_is_compatible("apple,t6050") &&
 	       of_device_is_compatible(dev->of_node, "apple,agx-g17s");
 }

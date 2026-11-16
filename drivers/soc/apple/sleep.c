@@ -76,6 +76,7 @@
 #include <linux/spinlock.h>
 #include <linux/suspend.h>
 #include <linux/workqueue.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 #include <clocksource/arm_arch_timer.h>
 #include <asm/apple-idle.h>
 #include <dt-bindings/gpio/gpio.h>
@@ -552,7 +553,7 @@ struct apple_sleep_soc {
 	unsigned int cpu_clusters;
 	unsigned int cpu_cores_per_cluster;
 	bool (*cpu_valid)(u64 mpidr);
-	const char *machine;
+	const char *const *machines;
 	u64 boot_mpidr;
 	unsigned int cpu_count;
 	struct apple_sleep_domains ps;
@@ -1579,7 +1580,7 @@ static int apple_sleep_validate_cpu_topology(struct apple_sleep *s)
 		    soc->cpu_cores_per_cluster > 32)
 		return dev_err_probe(s->dev, -EINVAL, "invalid CPU-start geometry\n");
 
-	if (soc->machine && (!of_machine_is_compatible(soc->machine) ||
+	if (soc->machines && (!of_machine_compatible_match(soc->machines) ||
 	    cpu_logical_map(0) != soc->boot_mpidr ||
 	    num_possible_cpus() != soc->cpu_count))
 		return dev_err_probe(s->dev, -EINVAL, "unsupported board/CPU inventory\n");

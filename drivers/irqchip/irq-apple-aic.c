@@ -59,6 +59,7 @@
 #include <linux/suspend.h>
 #include <linux/syscore_ops.h>
 #include <linux/irqchip/irq-apple-aic.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 #include <asm/apple_m1_pmu.h>
 #include <asm/cputype.h>
 #include <asm/exception.h>
@@ -287,7 +288,7 @@ struct aic_info {
 	/* A firmware-driven suspend powers the controller down: aic_syscore_ops keep it. */
 	bool fw_suspend;
 	/* If set, fw_suspend holds on this board only */
-	const char *fw_suspend_board;
+	const char *const *fw_suspend_boards;
 };
 
 static const struct aic_info aic1_info __initconst = {
@@ -345,7 +346,7 @@ static const struct aic_info aic3_t6050_info __initconst = {
 	.fast_ipi = true,
 	.local_fast_ipi = true,
 	.fw_suspend = true,
-	.fw_suspend_board = "apple,j714s",
+	.fw_suspend_boards = apple_t6050_sleep_boards,
 };
 
 static const struct aic_info aic3_t8140_info __initconst = {
@@ -1274,8 +1275,8 @@ static struct syscore aic_syscore = {
 static void __init aic_sleep_init(struct aic_irq_chip *irqc)
 {
 	if (!irqc->info.fw_suspend ||
-	    (irqc->info.fw_suspend_board &&
-	     !of_machine_is_compatible(irqc->info.fw_suspend_board)))
+	    (irqc->info.fw_suspend_boards &&
+	     !of_machine_compatible_match(irqc->info.fw_suspend_boards)))
 		return;
 
 	aic_sleep.irq_cfg = kcalloc(irqc->nr_die * irqc->nr_irq, sizeof(u32), GFP_KERNEL);

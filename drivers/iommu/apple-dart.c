@@ -56,6 +56,7 @@
 #include <linux/swab.h>
 #include <linux/sysfs.h>
 #include <linux/types.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "dma-iommu.h"
 
@@ -5334,7 +5335,7 @@ static int apple_dart_probe(struct platform_device *pdev)
 	if (dart->cold_ane && !IS_BUILTIN(CONFIG_APPLE_DART))
 		return -EOPNOTSUPP;
 	dart->isp_host = of_device_is_compatible(dev->of_node, "apple,t6050-isp-dart");
-	dart->isp_sleep = dart->isp_host && of_machine_is_compatible("apple,j714s");
+	dart->isp_sleep = dart->isp_host && apple_t6050_sleep_board();
 	dart->power_retained = dart->isp_host;
 	dart->per_stream = dart->isp_host ||
 			   of_device_is_compatible(dev->of_node, "apple,t8140-dart") ||

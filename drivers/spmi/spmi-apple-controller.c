@@ -31,6 +31,7 @@
 #include <linux/spinlock.h>
 #include <linux/spmi.h>
 #include <linux/suspend.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 /* SPMI Controller Registers */
 #define SPMI_STATUS_REG 0
@@ -242,7 +243,7 @@ static int apple_spmi_gen4_recover(struct spmi_controller *ctrl, struct apple_sp
 {
 	unsigned int i;
 
-	if (!of_machine_is_compatible("apple,j714s"))
+	if (!apple_t6050_sleep_board())
 		return -EIO;
 	usleep_range(REG_POLL_TIMEOUT_US, 2 * REG_POLL_TIMEOUT_US);
 	for (i = 0; i < SPMI_GEN4_REPLY_DRAIN_MAX; i++) {

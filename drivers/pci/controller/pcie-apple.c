@@ -48,6 +48,7 @@
 #include <linux/soc/apple/t8132.h>
 #include <linux/soc/apple/tunable.h>
 #include <linux/suspend.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "../pci.h"
 #include "pci-host-common.h"
@@ -5350,7 +5351,7 @@ static void apple_pcie_t6050_sleep_probe(struct platform_device *pdev, struct ap
 {
 	struct apple_pcie_port *port;
 
-	if (pcie->managed_sids || !of_machine_is_compatible("apple,j714s"))
+	if (pcie->managed_sids || !apple_t6050_sleep_board())
 		return;
 	/* The one port a boot loader trained; an endpoint Linux powers is parked instead. */
 	list_for_each_entry(port, &pcie->ports, entry)

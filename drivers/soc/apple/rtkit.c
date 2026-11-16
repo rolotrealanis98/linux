@@ -2762,7 +2762,8 @@ static int apple_rtkit_strict_idle_state(struct apple_rtkit *rtk, bool ap)
 		FIELD_PREP(APPLE_RTKIT_MGMT_PWR_STATE, APPLE_RTKIT_PWR_STATE_IDLE));
 	if (ret)
 		return ret;
-	if (!wait_for_completion_timeout(done, msecs_to_jiffies(250)))
+	/* 2 s where 27.0 needs 250 ms: kept from the K116s (27.2) bring-up, not measured again. */
+	if (!wait_for_completion_timeout(done, msecs_to_jiffies(2000)))
 		return -ETIMEDOUT;
 	return (ap ? READ_ONCE(rtk->ap_power_state) : READ_ONCE(rtk->iop_power_state)) ==
 		APPLE_RTKIT_PWR_STATE_IDLE ? 0 : -EPROTO;

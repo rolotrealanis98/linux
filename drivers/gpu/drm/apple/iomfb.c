@@ -2817,7 +2817,8 @@ edid_done:
 		published++;
 		if (modes[i].vrr) {
 			u16 lo = DIV_ROUND_UP(modes[i].min_vrr, 1U << 16);
-			u16 hi = modes[i].max_vrr >> 16;
+			/* 120.00002 Hz publishes as 120 */
+			u16 hi = DIV_ROUND_CLOSEST(modes[i].max_vrr, 1U << 16);
 
 			if (!min_vfreq || lo < min_vfreq)
 				min_vfreq = lo;

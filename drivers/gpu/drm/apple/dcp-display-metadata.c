@@ -447,7 +447,8 @@ const struct drm_edid *dcp_panel_edid(const struct dcp_display_metadata *metadat
 		high = DIV_ROUND_UP_ULL((u64)mode.clock * 1000, pixels);
 		if (entry->vrr && entry->min_vrr && entry->min_vrr <= entry->max_vrr) {
 			low = entry->min_vrr >> 16;
-			high = DIV_ROUND_UP_ULL(entry->max_vrr, 1U << 16);
+			/* 120.00002 Hz (the panel's 0x780001) reads 120, not 121 */
+			high = DIV_ROUND_CLOSEST_ULL(entry->max_vrr, 1U << 16);
 		}
 		min_v = min(min_v, low);
 		max_v = max(max_v, high);

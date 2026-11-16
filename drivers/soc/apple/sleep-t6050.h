@@ -571,6 +571,14 @@ static int t6050_sleep_pmu_xfer(struct apple_sleep *s, u8 opcode, u16 address,
 					 len);
 }
 
+/*
+ * Carried until the entry takes a sleep without one: with this set (the default), no armed RTC
+ * alarm is no refusal. The SMC's wake sources (lid, keys, power button) do not need the alarm;
+ * it is then neither checked against the sleep timer nor rearmed after the commit.
+ */
+static bool t6050_alarm_optional = true;
+module_param(t6050_alarm_optional, bool, 0644);
+
 /* Before the shared last-stop/enclave boundary: failure must leave ANS running. */
 static int t6050_sleep_check_alarm(struct apple_sleep *s)
 {
@@ -583,7 +591,7 @@ static int t6050_sleep_check_alarm(struct apple_sleep *s)
 	if (!ret)
 		ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_MASK, NULL, &mask, 1);
 	if (!ret && (!(control & T6050_RTC_CTL_ARMED) || (mask & BIT(0))))
-		ret = -EBUSY;
+		return t6050_alarm_optional ? 0 : -EBUSY;
 	if (!ret)
 		ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_COMPARE, NULL,
 					   r->alarm_compare, 4);
@@ -2824,6 +2832,9 @@ static int t6050_sleep_final_check(struct apple_sleep *s)
 	ret = t6050_sleep_check_alarm(s);
 	if (ret)
 		return ret;
+	/* No alarm armed: nothing to hold against the sleep timer */
+	if (!r->alarm_valid)
+		return 0;
 	ret = t6050_sleep_pmu_xfer(s, T6050_SPMI_EXT_READL, T6050_RTC_COUNTER, NULL, ticks, 6);
 	if (ret)
 		return ret;

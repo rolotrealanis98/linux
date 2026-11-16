@@ -1038,11 +1038,3 @@
 	snps,dis_enblslpm_quirk;
 	status = "okay";
 };
-
-/*
- * No CLPC link for the GPU: the performance controller is not validated on this
- * machine, and without the link the GPU runs as it did before the link existed.
- */
-&sgx {
-	/delete-property/ apple,clpc;
-};

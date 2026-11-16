@@ -251,6 +251,74 @@ static int dcp_v27_ext_cycle_ready(struct apple_dcp *dcp)
 }
 
 /*
+ * The DCP's secure port (J716s with appledrm.j716s_sleep=3: dcp_v27_secure_bind()), once it has
+ * been handshaken. A firmware 27 DCP with one takes its IOP idle only once the port has been
+ * AP-idled after the main mailbox's AP idle, and comes back from a restart with the port
+ * restarted before the main mailbox and mapped between its IOP report and its AP on, as
+ * dcp_s2r_warm_restart() does it. Found on the K116s (27.2) by Jens Axboe
+ * (aurora-silicon/linux#2075).
+ */
+static bool dcp_v27_secure(struct apple_dcp *dcp)
+{
+	return dcp->secure_rtk && dcp->secure_answered;
+}
+
+/* Between the main mailbox's AP and IOP idle, in process context. */
+static void dcp_v27_secure_idle(void *data)
+{
+	struct apple_dcp *dcp = data;
+	ktime_t start = ktime_get();
+	int ret;
+
+	dcp_secure_poll_stop(dcp);
+	ret = apple_rtkit_port_idle(dcp->secure_rtk, DCP_SECURE_TIMEOUT_MS);
+	dev_info(dcp->dev, "secure port: AP idle between the AP and IOP idle: %d (%lld us)\n", ret,
+		 ktime_us_delta(ktime_get(), start));
+}
+
+/* After a refused idle that had idled the port: the port on again and answered. */
+static void dcp_v27_secure_undo(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (!dcp_v27_secure(dcp) || READ_ONCE(dcp->secure_polling))
+		return;
+	ret = apple_rtkit_port_on(dcp->secure_rtk, DCP_SECURE_TIMEOUT_MS);
+	dev_info(dcp->dev, "secure port: AP on after the refused idle: %d\n", ret);
+	dcp_secure_poll_start(dcp);
+}
+
+/* The warm restart, with the port restarted first where there is one. */
+static int dcp_v27_warm_restart(struct apple_dcp *dcp, bool strict)
+{
+	int ret;
+
+	if (dcp_v27_secure(dcp)) {
+		dcp_secure_poll_stop(dcp);
+		ret = apple_rtkit_port_restart(dcp->secure_rtk);
+		dev_info(dcp->dev, "secure port: restart before the main mailbox: %d\n", ret);
+	}
+	return strict ? apple_rtkit_warm_restart_strict(dcp->rtk) :
+			apple_rtkit_warm_restart_stopped(dcp->rtk);
+}
+
+/* HELLO after RUN, with the port mapped before the main mailbox's AP on, then on. */
+static int dcp_v27_boot(struct apple_dcp *dcp)
+{
+	bool secure = dcp_v27_secure(dcp);
+	int ret, on;
+
+	ret = apple_rtkit_boot_with(dcp->rtk, secure ? dcp_secure_port_map : NULL, dcp);
+	if (ret || !secure)
+		return ret;
+	on = dcp->secure_map_ret ?: apple_rtkit_port_on(dcp->secure_rtk, DCP_SECURE_TIMEOUT_MS);
+	dev_info(dcp->dev, "secure port: map %d (%lld us), on %d\n", dcp->secure_map_ret,
+		 dcp->secure_map_us, on);
+	dcp_secure_poll_start(dcp);
+	return 0;
+}
+
+/*
  * macOS's DCP stop/restart between its wake steps: sessions closed, AP and IOP
  * idle, IDLE_DONE, receive off, CPU_CONTROL RUN off; dart-dcp stopped, the display's domain off and,
  * at least v27_cycle_hold_ms later, on; dart-dcp started, receive on, RUN on, HELLO, EPMAP, IOP and
@@ -266,9 +334,11 @@ static int dcp_v27_rtkit_cycle(struct apple_dcp *dcp, unsigned int pause_ms)
 	if (s && s->cycle_failed)
 		return -ECANCELED;
 	dcp_v27_sessions(dcp, false);
-	ret = apple_rtkit_idle_strict(dcp->rtk);
+	ret = apple_rtkit_idle_strict_with(dcp->rtk,
+					   dcp_v27_secure(dcp) ? dcp_v27_secure_idle : NULL, dcp);
 	if (ret) {
 		dev_warn(dcp->dev, "V27 wake: RTKit cycle: idle %d\n", ret);
+		dcp_v27_secure_undo(dcp);
 		dcp_v27_sessions(dcp, true);
 		return ret;
 	}
@@ -342,12 +412,12 @@ static int dcp_v27_rtkit_cycle(struct apple_dcp *dcp, unsigned int pause_ms)
 				dev_warn(dcp->dev, "V27 wake: RTKit cycle: display DART rewrite %d\n", ret);
 		}
 	}
-	ret = apple_rtkit_warm_restart_strict(dcp->rtk);
+	ret = dcp_v27_warm_restart(dcp, true);
 	if (!ret) {
 		writel(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) |
 		       APPLE_DCP_COPROC_CPU_CONTROL_RUN, dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
 		run_status = readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS);
-		ret = apple_rtkit_boot(dcp->rtk);
+		ret = dcp_v27_boot(dcp);
 	}
 	/*
 	 * An external processor that did not start is not left down: its DART, power words and
@@ -366,13 +436,13 @@ static int dcp_v27_rtkit_cycle(struct apple_dcp *dcp, unsigned int pause_ms)
 			ret = apple_dart_m5_display_cycle(dcp->s2r_dcp_dart, true);
 		}
 		if (!ret)
-			ret = apple_rtkit_warm_restart_stopped(dcp->rtk);
+			ret = dcp_v27_warm_restart(dcp, false);
 		if (!ret) {
 			writel(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) |
 			       APPLE_DCP_COPROC_CPU_CONTROL_RUN,
 			       dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
 			run_status = readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS);
-			ret = apple_rtkit_boot(dcp->rtk);
+			ret = dcp_v27_boot(dcp);
 		}
 	}
 	if (ret) {
@@ -1220,6 +1290,22 @@ static int dcp_v27_reopen_live(struct apple_dcp *dcp)
 	return 0;
 }
 
+/*
+ * The secure port's AP idle from the late idle (interrupts off), between the main mailbox's AP
+ * acknowledgment and its IOP request, polled. Sent and not seen acknowledged, the firmware gets
+ * the time the acknowledgment took on the K116s before the IOP request.
+ */
+static void dcp_v27_secure_idle_atomic(void *data)
+{
+	struct apple_dcp *dcp = data;
+	int ret;
+
+	ret = apple_rtkit_v27_port_ap_idle_atomic(dcp->secure_rtk, 5000);
+	if (ret == -ETIMEDOUT || ret == -ENODEV || ret == -EOPNOTSUPP)
+		udelay(2000);
+	dev_info(dcp->dev, "V27 late stop: secure port AP idle: %d\n", ret);
+}
+
 static int dcp_v27_late_arm(void *data)
 {
 	struct dcp_v27_sleep *s = data;
@@ -1249,6 +1335,8 @@ static int dcp_v27_late_arm(void *data)
 		ret = apple_rtkit_v27_arm(dcp->rtk, &s->rx);
 		if (ret)
 			dev_info(dcp->dev, "V27 arm: RTKit %d\n", ret);
+		else if (dcp_v27_secure(dcp))
+			apple_rtkit_v27_set_after_ap(s->rx, dcp_v27_secure_idle_atomic, dcp);
 	}
 	if (ret) {
 		if (s->display && !s->display_early) {
@@ -1365,8 +1453,11 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 		return -EOPNOTSUPP;
 	}
 	if (!dcp->retain_dma || IS_ERR_OR_NULL(dcp->rtk) || !dcp->active || dcp->crashed || dcp->quiescing ||
-	    dcp->peer_owner || dcp->peer_reserved || dcp->secure_rtk)
+	    dcp->peer_owner || dcp->peer_reserved || (dcp->secure_rtk && !dcp->secure_answered))
 		return -EBUSY;
+	/* A handshaken secure port is idled from the late stop, with nothing else reading it. */
+	if (dcp_v27_secure(dcp))
+		dcp_secure_poll_stop(dcp);
 	/* Mode-config suspend is the actual DRM scanout-owner boundary. No HPD
 	 * shortcut: external firmware still executes A484/A500/AFK and late IDLE.
 	 */
@@ -1603,7 +1694,7 @@ static int dcp_v27_sleep_restart(struct apple_dcp *dcp)
 	if (s->phase == V27_STOPPED) {
 		ret = apple_sleep_display_v27_power_ready(dcp->dev);
 		if (!ret)
-			ret = apple_rtkit_warm_restart_strict(dcp->rtk);
+			ret = dcp_v27_warm_restart(dcp, true);
 		/*
 		 * The final step stopped this CPU and it is still stopped: the firmware boots
 		 * from its reset vector next, so the state tracked before the stop does not
@@ -1612,12 +1703,12 @@ static int dcp_v27_sleep_restart(struct apple_dcp *dcp)
 		if (ret == -EUCLEAN && READ_ONCE(dcp->s2r_fw_down) &&
 		    !(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) &
 		      APPLE_DCP_COPROC_CPU_CONTROL_RUN))
-			ret = apple_rtkit_warm_restart_stopped(dcp->rtk);
+			ret = dcp_v27_warm_restart(dcp, false);
 		if (ret)
 			return dcp_v27_fail(s, ret);
 		writel(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) |
 			APPLE_DCP_COPROC_CPU_CONTROL_RUN, dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
-		ret = apple_rtkit_boot(dcp->rtk);
+		ret = dcp_v27_boot(dcp);
 		if (ret)
 			return dcp_v27_fail(s, ret);
 	}
@@ -1655,6 +1746,14 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
  *    v27_rtkit_cycles >= 1, the flagged set_power_state(1), A115(1), the display stage, the
  *    plain set_power_state(1)).
  *
+ * 3: 2 with the DCP's secure port (apple,secure-mbox): handshaken at bind when 3 is on the
+ *    command line, otherwise at the first DPMS off at 3, before anything else; refused or
+ *    unanswered, that off stays at 1. Once handshaken, every firmware stop and restart
+ *    (here, the wake's DCP cycle and the deep sleep's) takes the port along: its AP idle between
+ *    the main mailbox's AP and IOP idle, its restart before the main one, its map between the
+ *    main mailbox's IOP report and its AP on. On firmware 27.2 the K116s's DCP acknowledges no
+ *    IOP idle without that (aurora-silicon/linux#2075).
+ *
  * The tags are this build's (dcp->v27_sleep_tags), the arguments the DT's apple,sleep-*-args.
  * Every call and step is logged ("J716s DPMS: ...") with its result and its time: none of
  * set_power_state(0), its flags form or the AP link's release had run on 27.3 before. A step
@@ -1663,9 +1762,10 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
  */
 static unsigned int j716s_sleep;
 module_param(j716s_sleep, uint, 0644);
-MODULE_PARM_DESC(j716s_sleep, "J716s, DCP firmware 27.3: DPMS off (and a suspend-to-idle) also turns the display off on the running firmware (1), or also stops the display coprocessor and powers its domain down (2); default 0: the backlight only");
+MODULE_PARM_DESC(j716s_sleep, "J716s, DCP firmware 27.3: DPMS off (and a suspend-to-idle) also turns the display off on the running firmware (1), or also stops the display coprocessor and powers its domain down (2), the same with the DCP's secure port (3; on the command line: its handshake at bind); default 0: the backlight only");
 
 enum { V27_DPMS_ON, V27_DPMS_DISPLAY_OFF, V27_DPMS_STOPPED };
+#define J716S_SLEEP_SECURE	3
 
 static bool dcp_v27_dpms_board(struct apple_dcp *dcp)
 {
@@ -1695,6 +1795,53 @@ static int dcp_v27_dpms_step(struct apple_dcp *dcp, ktime_t start, const char *w
 	dev_info(dcp->dev, "J716s DPMS: %s: %d (%lld ms)\n", what, ret,
 		 ktime_ms_delta(ktime_get(), start));
 	return ret;
+}
+
+/* The secure port named and its RTKit set up; nothing is read from it before its handshake. */
+static int dcp_v27_secure_attach(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (dcp->secure_rtk)
+		return 0;
+	if (!of_property_present(dcp->dev->of_node, "apple,secure-mbox"))
+		return -ENODEV;
+	ret = dcp_secure_port_name(dcp);
+	if (!ret)
+		ret = dcp_secure_port_init(dcp);
+	if (!ret && !dcp->secure_rtk)
+		ret = -ENODEV;
+	return ret;
+}
+
+/*
+ * At bind, with appledrm.j716s_sleep=3 on the command line: the port set up here, handshaken
+ * by dcp_secure_port_start() after the firmware's HELLO, as on the K116s. Otherwise nothing.
+ */
+static void dcp_v27_secure_bind(struct apple_dcp *dcp)
+{
+	int ret;
+
+	if (READ_ONCE(j716s_sleep) < J716S_SLEEP_SECURE || !dcp_v27_dpms_board(dcp))
+		return;
+	ret = dcp_v27_secure_attach(dcp);
+	dev_info(dcp->dev, "J716s: secure port for appledrm.j716s_sleep=3 at bind: %d%s\n", ret,
+		 ret ? ", none" : ", handshake after HELLO");
+}
+
+/* At a DPMS off at 3 with no port handshaken at bind: now, before anything is sent. */
+static int dcp_v27_secure_late(struct apple_dcp *dcp, ktime_t start)
+{
+	int ret;
+
+	if (dcp_v27_secure(dcp))
+		return 0;
+	ret = dcp_v27_secure_attach(dcp);
+	if (!ret) {
+		dcp_secure_port_start(dcp);
+		ret = dcp_v27_secure(dcp) ? 0 : -ETIMEDOUT;
+	}
+	return dcp_v27_dpms_step(dcp, start, "secure port handshake (late, not at bind)", ret);
 }
 
 /*
@@ -1812,14 +1959,19 @@ static int dcp_v27_dpms_restart(struct apple_dcp *dcp, ktime_t start, bool power
  */
 static int dcp_v27_dpms_stop(struct apple_dcp *dcp, ktime_t start)
 {
+	bool secure = dcp_v27_secure(dcp);
 	u32 status;
 	int ret, undo;
 
-	ret = dcp_v27_dpms_step(dcp, start, "RTKit idle", apple_rtkit_idle_strict(dcp->rtk));
+	ret = dcp_v27_dpms_step(dcp, start,
+				secure ? "RTKit idle (secure port idled between AP and IOP)" : "RTKit idle",
+				apple_rtkit_idle_strict_with(dcp->rtk,
+							     secure ? dcp_v27_secure_idle : NULL, dcp));
 	if (ret) {
 		/* As after DPMS off's refused idle elsewhere (dcp_s2r_idle_undo()). */
 		dcp_v27_dpms_step(dcp, start, "RTKit AP on after the refused idle",
 				  apple_rtkit_ap_power(dcp->rtk, true));
+		dcp_v27_secure_undo(dcp);
 		return ret;
 	}
 	ret = readl_poll_timeout(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS, status,
@@ -1874,12 +2026,12 @@ static int dcp_v27_dpms_restart(struct apple_dcp *dcp, ktime_t start, bool power
 					  apple_dart_m5_display_rewrite(dcp->s2r_disp_dart));
 	}
 	ret = dcp_v27_dpms_step(dcp, start, "RTKit warm restart",
-				apple_rtkit_warm_restart_strict(dcp->rtk));
+				dcp_v27_warm_restart(dcp, true));
 	if (!ret) {
 		writel(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) |
 		       APPLE_DCP_COPROC_CPU_CONTROL_RUN, dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
 		run_status = readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS);
-		ret = dcp_v27_dpms_step(dcp, start, "RTKit boot (HELLO)", apple_rtkit_boot(dcp->rtk));
+		ret = dcp_v27_dpms_step(dcp, start, "RTKit boot (HELLO)", dcp_v27_boot(dcp));
 	}
 	dev_info(dcp->dev, "J716s DPMS: CPU status %#x at RUN\n", run_status);
 	if (!ret)
@@ -1903,7 +2055,8 @@ static void dcp_v27_dpms_undo(struct apple_dcp *dcp, ktime_t start, bool hard)
 
 static void dcp_v27_dpms_off(struct apple_dcp *dcp)
 {
-	unsigned int level = min(READ_ONCE(j716s_sleep), 2U);
+	unsigned int asked = min(READ_ONCE(j716s_sleep), (unsigned int)J716S_SLEEP_SECURE);
+	unsigned int level = min(asked, 2U);
 	ktime_t start = ktime_get();
 	const char *why = NULL;
 	int ret;
@@ -1920,8 +2073,14 @@ static void dcp_v27_dpms_off(struct apple_dcp *dcp)
 		dev_info(dcp->dev, "J716s DPMS: off refused (%s): backlight only\n", why);
 		return;
 	}
-	dev_info(dcp->dev, "J716s DPMS: off, level %u, tags %s\n", level,
-		 dcp->v27_sleep_tags->build);
+	dev_info(dcp->dev, "J716s DPMS: off, level %u, tags %s, secure port %s\n", asked,
+		 dcp->v27_sleep_tags->build, dcp_v27_secure(dcp) ? "up" :
+		 dcp->secure_rtk ? "set up, not answered" : "none");
+	/* 3: the port first; without it the firmware is not stopped. */
+	if (asked >= J716S_SLEEP_SECURE && dcp_v27_secure_late(dcp, start)) {
+		dev_info(dcp->dev, "J716s DPMS: no secure port: level 1 only\n");
+		level = 1;
+	}
 
 	iomfb_pause_presentation(dcp, true);
 	ret = iomfb_queue_settle(dcp, msecs_to_jiffies(500));
@@ -2065,4 +2224,5 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp) { return -EOPNOTSUPP; }
 static bool dcp_v27_dpms_selected(struct apple_dcp *dcp) { return false; }
 static void dcp_v27_dpms_off(struct apple_dcp *dcp) { }
 static void dcp_v27_dpms_on(struct apple_dcp *dcp) { }
+static void dcp_v27_secure_bind(struct apple_dcp *dcp) { }
 #endif

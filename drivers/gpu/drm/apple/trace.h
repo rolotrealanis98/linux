@@ -301,6 +301,28 @@ TRACE_EVENT(iomfb_swap_complete,
 	    )
 );
 
+/* The H17P swap completion's data: displayed_data and the first swap_info blob (0xe0 bytes). */
+TRACE_EVENT(iomfb_swap_complete_info,
+	    TP_PROTO(struct apple_dcp *dcp, u32 swap_id, u64 displayed,
+		     u32 count, const u8 *blob),
+	    TP_ARGS(dcp, swap_id, displayed, count, blob),
+	    TP_STRUCT__entry(
+			     __field(u32, swap_id)
+			     __field(u64, displayed)
+			     __field(u32, count)
+			     __array(u64, w, 28)
+	    ),
+	    TP_fast_assign(
+			   __entry->swap_id = swap_id;
+			   __entry->displayed = displayed;
+			   __entry->count = count;
+			   memcpy(__entry->w, blob, sizeof(__entry->w));
+	    ),
+	    TP_printk("swap_id=%d, displayed=%llu, count=%u, blob0=%s",
+		      __entry->swap_id, __entry->displayed, __entry->count,
+		      __print_array(__entry->w, 28, 8))
+);
+
 TRACE_EVENT(iomfb_swap_complete_intent_gated,
 	    TP_PROTO(struct apple_dcp *dcp, u32 swap_id, u32 width, u32 height),
 	    TP_ARGS(dcp, swap_id, width, height),

@@ -823,6 +823,13 @@ static void dcpep_cb_swap_complete(struct apple_dcp *dcp,
 {
 	ktime_t now = ktime_get();
 	trace_iomfb_swap_complete(dcp, resp->swap_id);
+#if (DCP_FW_H17(DCP_FW_VER) && !DCP_FW_DESKTOP_26(DCP_FW_VER))
+	if (trace_iomfb_swap_complete_info_enabled())
+		trace_iomfb_swap_complete_info(dcp, resp->swap_id,
+					       get_unaligned(&resp->displayed_data),
+					       resp->swap_info_count,
+					       resp->swap_info[0]);
+#endif
 #if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
 	if (dcp_peer_swap_complete_v27(dcp, resp->swap_id, now, dcp_peer_queue_completion))
 		return;

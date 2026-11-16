@@ -46,13 +46,15 @@
 #include "trace.h"
 
 /*
- * Firmware 27 panels (the T6050 ProMotion panel, 24-120 Hz) have not run
- * adaptive sync under this driver yet; offer it only when asked.
+ * Firmware 27 panels (the T6050 ProMotion panel, 24-120 Hz): variable refresh
+ * is offered through vrr_capable. Measured on the J716s (vrr-1, 2026-11-15):
+ * adaptive sync reaches the firmware (minRR 0x180000, VRR=YES), swaps present
+ * at 240 Hz subframe granularity, no timeout in a 100 s run. 0 turns it off.
  */
-static bool fw27_panel_vrr;
+static bool fw27_panel_vrr = true;
 module_param(fw27_panel_vrr, bool, 0644);
 MODULE_PARM_DESC(fw27_panel_vrr,
-		 "Firmware 27 panels: offer variable refresh through vrr_capable (default: off)");
+		 "Firmware 27 panels: offer variable refresh through vrr_capable (default: on)");
 
 /* Whether VRR_ENABLED may turn adaptive sync on for @dcp's display. */
 bool dcp_vrr_allowed(struct apple_dcp *dcp)

@@ -560,8 +560,18 @@ static void apple_rtkit_management_rx(struct apple_rtkit *rtk, u64 msg)
 static int apple_rtkit_alloc_shmem(struct apple_rtkit *rtk, u8 ep,
 				   struct apple_rtkit_shmem *buffer)
 {
-	if (READ_ONCE(rtk->ans_hold))
-		return apple_rtkit_ans_fail(rtk, -EBUSY);
+	/*
+	 * K116s (firmware 27.2): ANS asks for its syslog buffer (ep 2, 0x4000 bytes) about 2.4 s
+	 * into the wake, where the J714s's (27.0) never asks. A first buffer replaces none, so the
+	 * hold has nothing to protect: the log endpoints' first request is served.
+	 */
+	if (READ_ONCE(rtk->ans_hold)) {
+		if (!of_machine_is_compatible("apple,k116s") ||
+		    (ep != APPLE_RTKIT_EP_SYSLOG && ep != APPLE_RTKIT_EP_OSLOG &&
+		     ep != APPLE_RTKIT_EP_CRASHLOG))
+			return apple_rtkit_ans_fail(rtk, -EBUSY);
+		dev_dbg(rtk->dev, "RTKit: first buffer for ep %#x served under the ANS hold\n", ep);
+	}
 	/* The crash log's buffer is asked for only at a crash: serve it after a strict restart too. */
 	if (READ_ONCE(rtk->strict_retained_buffers) && ep != APPLE_RTKIT_EP_CRASHLOG)
 		return -EPROTO;

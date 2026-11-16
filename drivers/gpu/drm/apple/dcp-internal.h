@@ -754,10 +754,14 @@ struct apple_dcp {
 	 */
 	bool v27_j714s;
 	/*
-	 * The firmware 27 sleep's calls are known for this processor: the J714s on the 27.0
-	 * table, whose copy carries the sleep's A500 (iomfb_v27_methods_j714s()). The sleep sends
-	 * 27.0's tags (A484, A500, A414, ...), which other builds renumbered, and it relies on
-	 * sleep_v27_ep, which only a v27_j714s processor fills.
+	 * The firmware 27 sleep's tags for this processor's build and board, NULL if they were
+	 * never read for it (iomfb_v27_sleep_tags()): the J714s on 27.0, the J716s on 27.3.
+	 */
+	const struct iomfb_v27_sleep_tags *v27_sleep_tags;
+	/*
+	 * The firmware 27 deep sleep's display step is known for this processor: the J714s on the
+	 * 27.0 table, whose copy carries the sleep's A500 (iomfb_v27_methods_j714s()). It relies
+	 * on sleep_v27_ep, which only a v27_j714s processor fills.
 	 */
 	bool v27_sleep_known;
 	struct dcp_v27_sleep *sleep_v27;

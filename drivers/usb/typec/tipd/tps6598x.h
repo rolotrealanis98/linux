@@ -512,6 +512,8 @@ struct sn201202x {
 	bool ldcm_mitigation_known;
 	/* J714s, no connector (its MagSafe controller): only its system sleep state is driven */
 	bool sleep_only;
+	/* Left awake through a suspend to idle, see s2idle_spmi_sleep */
+	bool kept_awake;
 };
 
 extern const struct tipd_data *tipd_hw_variants[];

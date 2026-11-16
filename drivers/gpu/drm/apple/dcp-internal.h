@@ -764,6 +764,13 @@ struct apple_dcp {
 	 * on sleep_v27_ep, which only a v27_j714s processor fills.
 	 */
 	bool v27_sleep_known;
+	/*
+	 * J716s on 27.3: what DPMS off left of the internal display (appledrm.j716s_sleep): 0 on,
+	 * 1 off on the running firmware, 2 the firmware stopped and its domain powered down,
+	 * since v27_dpms_off_at.
+	 */
+	u8 v27_dpms;
+	ktime_t v27_dpms_off_at;
 	struct dcp_v27_sleep *sleep_v27;
 	bool sleep_v27_closed;
 	/*

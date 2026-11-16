@@ -8686,11 +8686,20 @@ static bool dcp_dpms_power_cycles(struct apple_dcp *dcp)
 	       (pm_suspend_target_state == PM_SUSPEND_ON || !pm_suspend_via_firmware());
 }
 
+/* J716s on 27.3: appledrm.j716s_sleep (dcp-v27-sleep.inc). */
+static bool dcp_v27_dpms_selected(struct apple_dcp *dcp);
+static void dcp_v27_dpms_off(struct apple_dcp *dcp);
+static void dcp_v27_dpms_on(struct apple_dcp *dcp);
+
 static void __dcp_dpms_power_off(struct apple_dcp *dcp)
 {
 	ktime_t start = ktime_get();
 	int ret;
 
+	if (dcp_v27_dpms_selected(dcp)) {
+		dcp_v27_dpms_off(dcp);
+		return;
+	}
 	if (!dcp_dpms_power_cycles(dcp) || READ_ONCE(dcp->s2r_fw_down))
 		return;
 
@@ -8740,6 +8749,11 @@ static void dcp_dpms_power_on(struct apple_dcp *dcp)
 	flush_work(&dcp->s2r_prewarm_work);
 	cancel_delayed_work_sync(&dcp->s2r_prewarm_off_wq);
 	guard(mutex)(&dcp->s2r_prewarm_lock);
+	/* Whatever appledrm.j716s_sleep reads now: what the off did is undone. */
+	if (dcp->v27_dpms) {
+		dcp_v27_dpms_on(dcp);
+		return;
+	}
 	/* Lit by the resume: only the mode set and the first frame are left, in the commit. */
 	if (dcp->s2r_wake_lit) {
 		dcp->s2r_wake_lit = false;

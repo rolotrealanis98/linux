@@ -1635,10 +1635,434 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
 	dcp_v27_ext_replug(dcp, !ret);
 	return ret;
 }
+
+/*
+ * J716s (firmware 27.3): DPMS off beyond the backlight, a suspend-to-idle's included
+ * (appledrm.j716s_sleep, read at each DPMS off):
+ *
+ * 0 (default): the backlight only, as before.
+ *
+ * 1: the display off on the running firmware, as macOS's display sleep (the display stage, the
+ *    plain set_power_state(0), the AP link's wake form). DPMS on: the display stage with the AP
+ *    link's wake form after each call, then the plain set_power_state(1), as a J714s sleep
+ *    refused between the display's soft off and the hard one comes back.
+ *
+ * 2: 1, then the J714s deep sleep's hard off (set_power_state(0) with the sleep's flags, A115(0),
+ *    the AP link's release) and the display processor stopped and powered down as the wake's
+ *    DCP cycle does it (dcp_v27_rtkit_cycle()): RTKit idle, the CPU stopped, dart-dcp's streams,
+ *    the display PMC and the power words off. DPMS on: the words, the PMC and dart-dcp on, a warm
+ *    restart, then the J714s's full wake (the AP link's wake form, one more DCP cycle with
+ *    v27_rtkit_cycles >= 1, the flagged set_power_state(1), A115(1), the display stage, the
+ *    plain set_power_state(1)).
+ *
+ * The tags are this build's (dcp->v27_sleep_tags), the arguments the DT's apple,sleep-*-args.
+ * Every call and step is logged ("J716s DPMS: ...") with its result and its time: none of
+ * set_power_state(0), its flags form or the AP link's release had run on 27.3 before. A step
+ * that fails turns the display on again where it can; a firmware that does not come back is
+ * marked crashed and the panel stays dark until reboot, as any lost DCP.
+ */
+static unsigned int j716s_sleep;
+module_param(j716s_sleep, uint, 0644);
+MODULE_PARM_DESC(j716s_sleep, "J716s, DCP firmware 27.3: DPMS off (and a suspend-to-idle) also turns the display off on the running firmware (1), or also stops the display coprocessor and powers its domain down (2); default 0: the backlight only");
+
+enum { V27_DPMS_ON, V27_DPMS_DISPLAY_OFF, V27_DPMS_STOPPED };
+
+static bool dcp_v27_dpms_board(struct apple_dcp *dcp)
+{
+	return dcp->v27_sleep_tags && of_machine_is_compatible("apple,j716s") &&
+	       of_device_is_compatible(dcp->dev->of_node, "apple,t6050-dcp") &&
+	       dcp->fw_compat == DCP_FIRMWARE_V_27_0 &&
+	       dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_DEFAULT;
+}
+
+/* Not in a firmware-driven sleep: its own step stops the firmware (dcp_v27_sleep_prepare()). */
+static bool dcp_v27_dpms_selected(struct apple_dcp *dcp)
+{
+	return READ_ONCE(j716s_sleep) && dcp_v27_dpms_board(dcp) &&
+	       (pm_suspend_target_state == PM_SUSPEND_ON || !pm_suspend_via_firmware());
+}
+
+static int dcp_v27_dpms_call(struct apple_dcp *dcp, ktime_t start,
+			     enum iomfb_v27_sleep_call call, const char *form, int ret)
+{
+	dev_info(dcp->dev, "J716s DPMS: %.4s %s: %d (%lld ms)\n", dcp->v27_sleep_tags->tag[call],
+		 form, ret, ktime_ms_delta(ktime_get(), start));
+	return ret;
+}
+
+static int dcp_v27_dpms_step(struct apple_dcp *dcp, ktime_t start, const char *what, int ret)
+{
+	dev_info(dcp->dev, "J716s DPMS: %s: %d (%lld ms)\n", what, ret,
+		 ktime_ms_delta(ktime_get(), start));
+	return ret;
+}
+
+/*
+ * The display stage, each call logged: pipe_cfg_414 with the DT's eight bytes, pipe_query_478
+ * twice, pipe_set_476 with the DT's word, pipe_query_478, is_main_display; with @ap_link the
+ * AP link's wake form after each. Their replies are not needed (dcp_v27_display_stage()).
+ */
+static void dcp_v27_dpms_stage(struct apple_dcp *dcp, ktime_t start, bool ap_link)
+{
+	u8 args[IOMFB_V27_STAGE_ARGS];
+	static const struct {
+		enum iomfb_v27_sleep_call call;
+		u8 in, out, arg;
+	} seq[] = {
+		{ V27_SLEEP_PIPE_CFG_414, 8, 8, 0 },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, 0 },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, 0 },
+		{ V27_SLEEP_PIPE_SET_476, 4, 0, 8 },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, 0 },
+		{ V27_SLEEP_IS_MAIN_DISPLAY, 0, 4, 0 },
+	};
+	unsigned int i;
+
+	if (iomfb_v27_display_args(dcp, true, args)) {
+		dcp_v27_dpms_step(dcp, start, "display stage: no apple,sleep-display-stage-args",
+				  -EOPNOTSUPP);
+		return;
+	}
+	for (i = 0; i < ARRAY_SIZE(seq); i++) {
+		dcp_v27_dpms_call(dcp, start, seq[i].call, "(display stage)",
+				  iomfb_v27_sleep_call(dcp, seq[i].call,
+						       seq[i].in ? args + seq[i].arg : NULL,
+						       seq[i].in, seq[i].out));
+		if (ap_link)
+			dcp_v27_dpms_call(dcp, start, V27_SLEEP_AP_LINK, "wake form",
+					  iomfb_v27_sleep_rpc(dcp, true, true));
+	}
+}
+
+/* Level 1's off: macOS's display sleep on the running firmware. */
+static int dcp_v27_dpms_display_off(struct apple_dcp *dcp, ktime_t start)
+{
+	int ret;
+
+	dcp_v27_dpms_stage(dcp, start, false);
+	ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "plain (0)",
+				iomfb_v27_sleep_plain(dcp, false));
+	if (ret)
+		return ret;
+	dcp_v27_dpms_call(dcp, start, V27_SLEEP_AP_LINK, "wake form",
+			  iomfb_v27_sleep_rpc(dcp, true, true));
+	return 0;
+}
+
+/* Level 1's on, from the display off on a running firmware. */
+static int dcp_v27_dpms_display_on(struct apple_dcp *dcp, ktime_t start)
+{
+	dcp_v27_dpms_stage(dcp, start, true);
+	return dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "plain (1)",
+				 iomfb_v27_sleep_plain(dcp, true));
+}
+
+/* The hard state back on a firmware that kept running: the wake's calls without a restart. */
+static int dcp_v27_dpms_hard_on(struct apple_dcp *dcp, ktime_t start)
+{
+	int ret;
+
+	dcp_v27_dpms_call(dcp, start, V27_SLEEP_AP_LINK, "wake form",
+			  iomfb_v27_sleep_rpc(dcp, true, true));
+	if (v27_a115)
+		dcp_v27_dpms_call(dcp, start, V27_SLEEP_PIPE_QUERY_478, "(query)",
+				  iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4));
+	ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "flags (1)",
+				iomfb_v27_sleep_rpc(dcp, false, true));
+	if (!ret && v27_a115)
+		dcp_v27_dpms_call(dcp, start, V27_SLEEP_A115, "(1)", iomfb_v27_sleep_a115(dcp, true));
+	return ret;
+}
+
+/*
+ * What a power cycle needs, checked before anything is stopped: both DARTs, the sleep
+ * profile's display power words read on, and the display PMC's window. Without the cycle a
+ * stopped display processor gives no HELLO.
+ */
+static int dcp_v27_dpms_cycle_ready(struct apple_dcp *dcp, const char **why)
+{
+	struct resource *res;
+	int ret;
+
+	dcp_s2r_find_darts(dcp);
+	if (!dcp->s2r_dcp_dart || !dcp->s2r_disp_dart) {
+		*why = "DARTs not found";
+		return -ENODEV;
+	}
+	ret = apple_sleep_display_v27_power_ready(dcp->dev);
+	if (ret) {
+		*why = "sleep profile's display power words not ready";
+		return ret;
+	}
+	res = platform_get_resource_byname(to_platform_device(dcp->dev), IORESOURCE_MEM, "disp-4");
+	if (v27_cycle_pmc && (!res || res->start != 0x286700000ULL ||
+			      resource_size(res) < V27_PMC_BASE + V27_PMC_SIZE)) {
+		*why = "no display PMC window (disp-4)";
+		return -ENODEV;
+	}
+	return 0;
+}
+
+static int dcp_v27_dpms_restart(struct apple_dcp *dcp, ktime_t start, bool powered_off);
+
+/*
+ * The display processor stopped and its domain powered down, as the first half of the wake's
+ * DCP cycle. 0 with the CPU stopped and the words off (s2r_fw_down set). Refused before the CPU
+ * stops, the firmware keeps running; a DART that does not stop is started again at once.
+ */
+static int dcp_v27_dpms_stop(struct apple_dcp *dcp, ktime_t start)
+{
+	u32 status;
+	int ret, undo;
+
+	ret = dcp_v27_dpms_step(dcp, start, "RTKit idle", apple_rtkit_idle_strict(dcp->rtk));
+	if (ret) {
+		/* As after DPMS off's refused idle elsewhere (dcp_s2r_idle_undo()). */
+		dcp_v27_dpms_step(dcp, start, "RTKit AP on after the refused idle",
+				  apple_rtkit_ap_power(dcp->rtk, true));
+		return ret;
+	}
+	ret = readl_poll_timeout(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS, status,
+		(status & (APPLE_DCP_COPROC_CPU_STATUS_IDLE | APPLE_DCP_COPROC_CPU_STATUS_STOPPED)) ==
+		(APPLE_DCP_COPROC_CPU_STATUS_IDLE | APPLE_DCP_COPROC_CPU_STATUS_STOPPED), 10, 5000);
+	dev_info(dcp->dev, "J716s DPMS: CPU status %#x after the idle: %d\n", status, ret);
+	apple_rtkit_set_recv_enabled(dcp->rtk, false);
+	dcp_s2r_cpu_stop(dcp);
+	WRITE_ONCE(dcp->s2r_fw_down, true);
+	dev_info(dcp->dev, "J716s DPMS: CPU stopped: control %#x status %#x (%lld ms)\n",
+		 readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL),
+		 readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS),
+		 ktime_ms_delta(ktime_get(), start));
+	ret = dcp_v27_dpms_step(dcp, start, "dart-dcp streams off",
+				apple_dart_m5_display_cycle(dcp->s2r_dcp_dart, false));
+	if (ret) {
+		/* Never power the domain off under a live DART: started again, unpowered. */
+		undo = dcp_v27_dpms_restart(dcp, start, false);
+		return undo ? undo : ret;
+	}
+	if (v27_cycle_pmc)
+		dcp_v27_dpms_step(dcp, start, "display PMC off", dcp_v27_cycle_pmc(dcp, false));
+	dcp_v27_dpms_step(dcp, start, "display power words off",
+			  apple_sleep_m5_display_power(false));
+	dcp->v27_dpms_off_at = ktime_get();
+	return 0;
+}
+
+/*
+ * The second half: the words, the PMC and dart-dcp on (@powered_off), the display pipe DART's
+ * own streams written back, then a warm restart. 0 with the firmware up again.
+ */
+static int dcp_v27_dpms_restart(struct apple_dcp *dcp, ktime_t start, bool powered_off)
+{
+	s64 off_ms;
+	u32 run_status = 0;
+	int ret;
+
+	if (powered_off) {
+		/* As macOS's: at least v27_cycle_hold_ms off, or there is no HELLO. */
+		off_ms = ktime_ms_delta(ktime_get(), dcp->v27_dpms_off_at);
+		if (off_ms >= 0 && off_ms < v27_cycle_hold_ms)
+			msleep(v27_cycle_hold_ms - (unsigned int)off_ms);
+		dcp_v27_dpms_step(dcp, start, "display power words on",
+				  apple_sleep_m5_display_power(true));
+		if (v27_cycle_pmc)
+			dcp_v27_dpms_step(dcp, start, "display PMC on", dcp_v27_cycle_pmc(dcp, true));
+		dcp_v27_dpms_step(dcp, start, "dart-dcp streams on",
+				  apple_dart_m5_display_cycle(dcp->s2r_dcp_dart, true));
+		if (v27_cycle_disp_rewrite)
+			dcp_v27_dpms_step(dcp, start, "display DART streams written back",
+					  apple_dart_m5_display_rewrite(dcp->s2r_disp_dart));
+	}
+	ret = dcp_v27_dpms_step(dcp, start, "RTKit warm restart",
+				apple_rtkit_warm_restart_strict(dcp->rtk));
+	if (!ret) {
+		writel(readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL) |
+		       APPLE_DCP_COPROC_CPU_CONTROL_RUN, dcp->coproc_reg + APPLE_DCP_COPROC_CPU_CONTROL);
+		run_status = readl(dcp->coproc_reg + APPLE_DCP_COPROC_CPU_STATUS);
+		ret = dcp_v27_dpms_step(dcp, start, "RTKit boot (HELLO)", apple_rtkit_boot(dcp->rtk));
+	}
+	dev_info(dcp->dev, "J716s DPMS: CPU status %#x at RUN\n", run_status);
+	if (!ret)
+		WRITE_ONCE(dcp->s2r_fw_down, false);
+	return ret;
+}
+
+/* The display on again after a refused or failed off; logged, nothing else to fall back to. */
+static void dcp_v27_dpms_undo(struct apple_dcp *dcp, ktime_t start, bool hard)
+{
+	int ret = 0;
+
+	if (hard)
+		ret = dcp_v27_dpms_hard_on(dcp, start);
+	if (!ret)
+		ret = dcp_v27_dpms_display_on(dcp, start);
+	if (ret)
+		dev_err(dcp->dev, "J716s DPMS: display not back on: %d; DPMS on powers it on as at boot\n",
+			ret);
+}
+
+static void dcp_v27_dpms_off(struct apple_dcp *dcp)
+{
+	unsigned int level = min(READ_ONCE(j716s_sleep), 2U);
+	ktime_t start = ktime_get();
+	const char *why = NULL;
+	int ret;
+
+	if (dcp->v27_dpms != V27_DPMS_ON)
+		return;
+	if (READ_ONCE(dcp->crashed) || IS_ERR_OR_NULL(dcp->rtk) || !dcp->active)
+		why = "firmware not running";
+	else if (!READ_ONCE(dcp->pipe_enabled_h17p))
+		why = "display pipe not on";
+	else if (!iomfb_v27_display_described(dcp))
+		why = "no apple,sleep-display-*-args in the DT";
+	if (why) {
+		dev_info(dcp->dev, "J716s DPMS: off refused (%s): backlight only\n", why);
+		return;
+	}
+	dev_info(dcp->dev, "J716s DPMS: off, level %u, tags %s\n", level,
+		 dcp->v27_sleep_tags->build);
+
+	iomfb_pause_presentation(dcp, true);
+	ret = iomfb_queue_settle(dcp, msecs_to_jiffies(500));
+	if (ret) {
+		iomfb_pause_presentation(dcp, false);
+		dcp_v27_dpms_step(dcp, start, "display updates still pending: backlight only", ret);
+		return;
+	}
+
+	ret = dcp_v27_dpms_display_off(dcp, start);
+	if (ret) {
+		dev_warn(dcp->dev, "J716s DPMS: display off failed: %d; turning it on again\n", ret);
+		dcp_v27_dpms_undo(dcp, start, false);
+		iomfb_pause_presentation(dcp, false);
+		return;
+	}
+	dcp->v27_dpms = V27_DPMS_DISPLAY_OFF;
+	dcp->v27_dpms_off_at = ktime_get();
+	if (level < 2)
+		goto done;
+
+	if (!iomfb_v27_sleep_described(dcp))
+		why = "no apple,sleep-power-args / apple,sleep-a500-args in the DT";
+	else
+		dcp_v27_dpms_cycle_ready(dcp, &why);
+	if (why) {
+		dev_info(dcp->dev, "J716s DPMS: firmware stop refused (%s): display off, firmware running\n",
+			 why);
+		dcp_s2r_put_darts(dcp);
+		goto done;
+	}
+
+	/* The deep sleep's hard off, as macOS's (dcp_v27_sleep_prepare()). */
+	if (v27_a115)
+		dcp_v27_dpms_call(dcp, start, V27_SLEEP_PIPE_QUERY_478, "(query)",
+				  iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4));
+	ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "flags (0)",
+				iomfb_v27_sleep_rpc(dcp, false, false));
+	if (ret) {
+		/* Answered or not, the hard state may have moved: both back on. */
+		dcp_v27_dpms_undo(dcp, start, true);
+		goto fail;
+	}
+	if (v27_a115)
+		dcp_v27_dpms_call(dcp, start, V27_SLEEP_A115, "(0)", iomfb_v27_sleep_a115(dcp, false));
+	ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_AP_LINK, "sleep form (release)",
+				iomfb_v27_sleep_rpc(dcp, true, false));
+	if (!ret)
+		ret = dcp_v27_dpms_step(dcp, start, "calls settled",
+					iomfb_queue_settle(dcp, msecs_to_jiffies(1000)));
+	if (ret) {
+		dcp_v27_dpms_undo(dcp, start, true);
+		goto fail;
+	}
+
+	ret = dcp_v27_dpms_stop(dcp, start);
+	if (ret) {
+		dev_warn(dcp->dev, "J716s DPMS: firmware stop failed: %d\n", ret);
+		/* Still stopped: nothing to undo with, as any lost DCP. */
+		if (READ_ONCE(dcp->s2r_fw_down)) {
+			WRITE_ONCE(dcp->crashed, true);
+			dev_err(dcp->dev, "J716s DPMS: firmware did not start again: display off until reboot\n");
+			dcp->v27_dpms = V27_DPMS_ON;
+			dcp_s2r_put_darts(dcp);
+			return;
+		}
+		dcp_v27_dpms_undo(dcp, start, true);
+		goto fail;
+	}
+	dcp->v27_dpms = V27_DPMS_STOPPED;
+done:
+	dev_info(dcp->dev, "J716s DPMS: off done at level %u in %lld ms\n", dcp->v27_dpms,
+		 ktime_ms_delta(ktime_get(), start));
+	return;
+fail:
+	dcp_s2r_put_darts(dcp);
+	dcp->v27_dpms = V27_DPMS_ON;
+	iomfb_pause_presentation(dcp, false);
+	dev_warn(dcp->dev, "J716s DPMS: off failed at level 2 (%d), display on again\n", ret);
+}
+
+static void dcp_v27_dpms_on(struct apple_dcp *dcp)
+{
+	unsigned int was = dcp->v27_dpms;
+	ktime_t start = ktime_get();
+	int ret = 0;
+
+	if (was == V27_DPMS_ON)
+		return;
+	dev_info(dcp->dev, "J716s DPMS: on, from level %u (off %lld ms)\n", was,
+		 ktime_ms_delta(start, dcp->v27_dpms_off_at));
+	dcp->v27_dpms = V27_DPMS_ON;
+	if (was == V27_DPMS_STOPPED) {
+		ret = dcp_v27_dpms_restart(dcp, start, true);
+		if (ret) {
+			WRITE_ONCE(dcp->crashed, true);
+			dcp_s2r_put_darts(dcp);
+			dev_err(dcp->dev, "J716s DPMS: firmware did not start again: %d; display off until reboot\n",
+				ret);
+			return;
+		}
+		/* The J714s's full wake (dcp_v27_reopen_live()). */
+		dcp_v27_dpms_call(dcp, start, V27_SLEEP_AP_LINK, "wake form",
+				  iomfb_v27_sleep_rpc(dcp, true, true));
+		if (v27_rtkit_cycles >= 1)
+			dcp_v27_dpms_step(dcp, start, "one more DCP stop/restart (v27_rtkit_cycles)",
+					  dcp_v27_rtkit_cycle(dcp, 0));
+		if (v27_a115)
+			dcp_v27_dpms_call(dcp, start, V27_SLEEP_PIPE_QUERY_478, "(query)",
+					  iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478,
+							       NULL, 0, 4));
+		ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "flags (1)",
+					iomfb_v27_sleep_rpc(dcp, false, true));
+		if (!ret && v27_a115)
+			dcp_v27_dpms_call(dcp, start, V27_SLEEP_A115, "(1)",
+					  iomfb_v27_sleep_a115(dcp, true));
+		if (!ret) {
+			dcp_v27_dpms_stage(dcp, start, false);
+			ret = dcp_v27_dpms_call(dcp, start, V27_SLEEP_SET_POWER_STATE, "plain (1)",
+						iomfb_v27_sleep_plain(dcp, true));
+		}
+		dcp_s2r_put_darts(dcp);
+	} else {
+		ret = dcp_v27_dpms_display_on(dcp, start);
+	}
+	iomfb_pause_presentation(dcp, false);
+	dcp->brightness.update = true;
+	if (ret)
+		dev_err(dcp->dev, "J716s DPMS: display not back on: %d; powering it on as at boot\n",
+			ret);
+	else
+		dev_info(dcp->dev, "J716s DPMS: on done in %lld ms\n",
+			 ktime_ms_delta(ktime_get(), start));
+}
 #else
 static bool dcp_v27_sleep_selected(struct apple_dcp *dcp) { return false; }
 static void dcp_v27_sleep_invalidate(struct apple_dcp *dcp) { }
 static int dcp_v27_sleep_known(struct apple_dcp *dcp) { return 0; }
 static int dcp_v27_sleep_suspend(struct apple_dcp *dcp) { return -EOPNOTSUPP; }
 static int dcp_v27_sleep_resume(struct apple_dcp *dcp) { return -EOPNOTSUPP; }
+static bool dcp_v27_dpms_selected(struct apple_dcp *dcp) { return false; }
+static void dcp_v27_dpms_off(struct apple_dcp *dcp) { }
+static void dcp_v27_dpms_on(struct apple_dcp *dcp) { }
 #endif

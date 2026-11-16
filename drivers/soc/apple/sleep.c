@@ -5078,8 +5078,9 @@ int apple_sleep_display_v27_power_ready(struct device *dev)
 	struct apple_sleep *s = apple_sleep;
 	unsigned int d, j;
 
+	/* The T6050 boards whose sleep is described (the J714s, and the J716s with its tree). */
 	if (!s || !s->soc->regions || !s->region ||
-	    !of_machine_is_compatible("apple,j714s") || s->soc->ndisp != 5)
+	    !apple_t6050_sleep_board() || s->soc->ndisp != 5)
 		return -EOPNOTSUPP;
 	if (s->region->late_errors || s->region->display_lowered)
 		return -EIO;

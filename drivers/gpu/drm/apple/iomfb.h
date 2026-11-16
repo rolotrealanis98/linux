@@ -251,6 +251,11 @@ enum iomfb_v27_sleep_call {
 struct iomfb_v27_sleep_tags {
 	const char *build;
 	char tag[V27_SLEEP_NUM_CALLS][4];
+	/*
+	 * The out-of-band A442's bytes past its first 16 are zeros, not 27.0's 0xaa filler: the
+	 * build reads an index count and a block size there.
+	 */
+	bool a442_zeros;
 };
 
 struct device;

@@ -1657,6 +1657,17 @@ static int t6050_sleep_ptd_ownership(struct apple_sleep *s, bool own)
 	report = of_find_compatible_node(NULL, NULL, "apple,t6050-pmp-v2-report");
 	if (!report)
 		return -ENODEV;
+	/*
+	 * A tree that keeps the PMP and its report off (the J716s's): no driver writes the PTD
+	 * entries, so the sleep's own writes have no one to take them from.
+	 */
+	if (!of_device_is_available(report)) {
+		of_node_put(report);
+		if (!r->ptd_owned)
+			dev_info(s->dev, "PMP report disabled in this tree: PTD entries are the sleep's alone\n");
+		r->ptd_owned = true;
+		return 0;
+	}
 	for_each_child_of_node(report, entry) {
 		u32 id;
 
@@ -1689,37 +1700,44 @@ out:
 
 /*
  * EL1's Apple timers off on the boot core before the sleep; under Linux they keep iBoot's
- * state. Done on the core itself, in a bound worker.
+ * state. Done on the core itself, by IPI: a bound worker there missed its 2 s on the J716s
+ * (deep-sleep-11, frozen tasks, idle=nop), leaving them as they were.
  */
-static struct {
-	struct work_struct work;
-	struct completion done;
-} t6050_agt_off;
+struct t6050_agt_regs {
+	u64 ctl, cntp_ctl;
+};
 
-static void t6050_agt_off_work(struct work_struct *w)
+static void t6050_agt_off_ipi(void *arg)
 {
+	struct t6050_agt_regs *old = arg;
+
+	old->ctl = read_sysreg_s(SYS_APL_AGT_CTL_EL02);
+	old->cntp_ctl = read_sysreg_s(SYS_APL_AGTCNTP_CTL_EL02);
 	write_sysreg_s(0, SYS_APL_AGT_CTL_EL02);
 	write_sysreg_s(0, SYS_APL_AGTCNTP_CTL_EL02);
 	isb();
-	complete(&t6050_agt_off.done);
 }
 
 static void t6050_sleep_boot_timer_off(struct apple_sleep *s)
 {
-	int cpu;
+	struct t6050_agt_regs old = {};
+	int cpu, ret;
 
 	if (!is_kernel_in_hyp_mode())
 		return;
 	for_each_online_cpu(cpu) {
 		if (cpu_logical_map(cpu) != s->mbox->boot_mpidr)
 			continue;
-		INIT_WORK(&t6050_agt_off.work, t6050_agt_off_work);
-		init_completion(&t6050_agt_off.done);
-		queue_work_on(cpu, system_highpri_wq, &t6050_agt_off.work);
-		if (!wait_for_completion_timeout(&t6050_agt_off.done, 2 * HZ))
-			dev_warn(s->dev, "boot core's timers not turned off\n");
+		ret = smp_call_function_single(cpu, t6050_agt_off_ipi, &old, 1);
+		if (ret)
+			dev_warn(s->dev, "boot core's timers not turned off: %d\n", ret);
+		else
+			dev_dbg(s->dev, "boot core (CPU%d) timers off: AGT_CTL %#llx AGTCNTP_CTL %#llx\n",
+				cpu, old.ctl, old.cntp_ctl);
 		return;
 	}
+	dev_warn(s->dev, "boot core %#llx not online: its timers stay as they are\n",
+		 s->mbox->boot_mpidr);
 }
 
 /* WD2 from the commit: a net until the sleep engine arms it, long enough for the resume. */

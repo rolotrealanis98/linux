@@ -721,6 +721,15 @@ static void apple_clpc_gpu_floor_count(struct apple_clpc *clpc, bool released)
  * state: every rail at the top of @map, or at @gpu where that is higher,
  * while the driver reports work.
  */
+/*
+ * Whether the GPU driver's input raises the floors; off, GPU work gets only
+ * what the CPU load asks for, as without the link. Read every sample, so the
+ * cost of the GPU floor at idle can be compared in one boot.
+ */
+static bool gpu_floor = true;
+module_param(gpu_floor, bool, 0644);
+MODULE_PARM_DESC(gpu_floor, "Raise the DRAM and fabric floors for reported GPU work (default: on)");
+
 static bool apple_clpc_gpu_input_demand(const struct apple_clpc_hw *hw,
 					struct apple_clpc_gpu *gpu,
 					unsigned int *demand)
@@ -728,7 +737,7 @@ static bool apple_clpc_gpu_input_demand(const struct apple_clpc_hw *hw,
 	u64 updated, sequence;
 	unsigned int rail;
 
-	if (!gpu || hw->gpu_demand ||
+	if (!gpu || hw->gpu_demand || !READ_ONCE(gpu_floor) ||
 	    !apple_clpc_gpu_active(gpu, &updated, &sequence))
 		return false;
 	for (rail = 0; rail < APPLE_CLPC_RAILS; rail++)

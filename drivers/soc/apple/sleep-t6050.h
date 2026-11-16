@@ -1021,7 +1021,7 @@ static void t6050_boot_writes_all(struct apple_sleep *s)
 static ssize_t t6050_boot_writes_write(struct file *file, const char __user *ubuf, size_t len,
 				       loff_t *ppos)
 {
-	struct apple_sleep *s = file->private_data;
+	struct apple_sleep *s = ((struct seq_file *)file->private_data)->private;
 	struct apple_sleep_region_state *r = s->region;
 	unsigned int g, first = 0, count = UINT_MAX;
 	char buf[48], name[8];
@@ -1060,13 +1060,10 @@ static int t6050_boot_writes_show(struct seq_file *m, void *unused)
 	return 0;
 }
 
+/* single_open() owns file->private_data (the seq_file); the driver's state is its ->private. */
 static int t6050_boot_writes_open(struct inode *inode, struct file *file)
 {
-	int ret = single_open(file, t6050_boot_writes_show, inode->i_private);
-
-	if (!ret)
-		file->private_data = inode->i_private;
-	return ret;
+	return single_open(file, t6050_boot_writes_show, inode->i_private);
 }
 
 static const struct file_operations t6050_boot_writes_fops = {

@@ -356,9 +356,16 @@ static const struct apple_soc_cpufreq_info soc_t8132_info = {
 	.ps1_shift = APPLE_DVFS_CMD_PS1_SHIFT,
 };
 
-/* Command-state readback, not a measurement of the clock frequency. */
+/*
+ * Command-state readback, not a measurement of the clock frequency. As on
+ * T8140, the command register reads back the last accepted request, so
+ * requests are verified lazily: schedutil switches from the scheduler and
+ * idle clusters can be parked (see "Idle parking"). Measured on the J716s
+ * only.
+ */
 static const struct apple_soc_cpufreq_info soc_t6050_info = {
 	.verify_transition = true,
+	.lazy_verify = true,
 	.needs_firmware_thermal_control = true,
 	.transition_timeout_us = 2000,
 	.max_pstate = 31,
@@ -591,6 +598,15 @@ static int apple_soc_cpufreq_lazy_set(struct apple_cpu_priv *priv,
  * is pending, or once a transition has failed. Other SoCs that verify
  * transitions do not park.
  */
+/*
+ * Whether idle clusters are parked; off leaves every cluster at its last
+ * request, as before parking existed. Read on each idle entry, so it can be
+ * switched at run time (a parked cluster is restored by its first wakeup).
+ */
+static bool idle_park = true;
+module_param(idle_park, bool, 0644);
+MODULE_PARM_DESC(idle_park, "Park a fully idle cluster at its slowest state (default: on)");
+
 static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 {
 	struct apple_cpu_priv *priv = READ_ONCE(per_cpu(apple_park_priv, cpu));
@@ -603,7 +619,7 @@ static void apple_soc_cpufreq_park_enter(unsigned int cpu)
 
 	raw_spin_lock_irqsave(&priv->lock, flags);
 	cpumask_set_cpu(cpu, &priv->park_idle);
-	if (priv->parked)
+	if (priv->parked || !READ_ONCE(idle_park))
 		goto out;
 	if (priv->info->lazy_verify) {
 		if (priv->waited || priv->transition_failed || priv->pending_pstate >= 0)

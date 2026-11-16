@@ -373,7 +373,10 @@
 
 #include "t6050-max-atc2.dtsi"
 
-/* A host DROM (the J714s's, ADT /arm-io/acio2 thunderbolt-drom) until the boot loader replaces it */
+/*
+ * The host DROM: the J716sAP ADT's /arm-io/acio2 thunderbolt-drom (equal to the J714s's,
+ * UID 2); the boot loader replaces it
+ */
 &acio2_nhi {
 	apple,thunderbolt-drom = [fd 02 00 00 00 00 00 00 00 90 19 c3 8c 00 5c 00
 			00 00 00 00 00 00 08 81 82 02 82 00 00 00 08 82
@@ -382,6 +385,20 @@
 			00 00 00 00 00 00 05 88 09 01 00 05 89 09 01 00
 			05 8a 09 01 00 0e 01 41 70 70 6c 65 2c 20 49 6e
 			63 2e 00 06 02 69 4f 53 00 00 00 00];
+};
+
+/*
+ * Left-front port (ATC1): the USB4/Thunderbolt router and its PCIe tunnel. The J716sAP ADT's
+ * /arm-io/acio1, acio-cpu1, dart-acio1, apciec1 and dart-apciec1 have the J714s's addresses,
+ * interrupts, LSTX pin (79) and tunables, and the same host DROM (UID 1), so the J714s's
+ * description is taken as it is. Only the PHY's CIO80 RX_TOP tunables differ: this board's
+ * atc-phy1 tunable_LN0/LN1_RX_TOP_CIO_DFLT leave the field at 0, as ATC2's do.
+ */
+#include "t6050-j714s-left-usb4.dtsi"
+
+&atc1_phy {
+	apple,tunable-lane0-rx-top-cio = <0x35c 0xe00 0x0>;
+	apple,tunable-lane1-rx-top-cio = <0x35c 0xe00 0x0>;
 };
 
 /*

@@ -1700,9 +1700,18 @@ out:
 
 /*
  * EL1's Apple timers off on the boot core before the sleep; under Linux they keep iBoot's
- * state. Done on the core itself, by IPI: a bound worker there missed its 2 s on the J716s
- * (deep-sleep-11, frozen tasks, idle=nop), leaving them as they were.
+ * state. Done on the core itself, by IPI.
+ *
+ * Off by default: on the J716s the first write, MSR S3_4_C15_C2_7 from EL2 with E2H, is an
+ * undefined instruction (deep-sleep-11: Oops ESR 0x02000000 at that MSR in the bound worker;
+ * the oops killed CPU0's high-priority kworker, so block I/O completions stopped and the root
+ * file system hung). In an IPI the same fault would be a fatal exception in interrupt context.
+ * The access encoding for these timers on T6050 is not known yet.
  */
+static bool t6050_agt_off;
+module_param(t6050_agt_off, bool, 0644);
+MODULE_PARM_DESC(t6050_agt_off, "clear the boot core's Apple timers before deep sleep (undefined on the J716s: leave off)");
+
 struct t6050_agt_regs {
 	u64 ctl, cntp_ctl;
 };
@@ -1725,6 +1734,10 @@ static void t6050_sleep_boot_timer_off(struct apple_sleep *s)
 
 	if (!is_kernel_in_hyp_mode())
 		return;
+	if (!t6050_agt_off) {
+		dev_info_once(s->dev, "boot core's Apple timers left as they are (apple_sleep.t6050_agt_off=0)\n");
+		return;
+	}
 	for_each_online_cpu(cpu) {
 		if (cpu_logical_map(cpu) != s->mbox->boot_mpidr)
 			continue;

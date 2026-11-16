@@ -2768,7 +2768,13 @@ static int apple_rtkit_strict_idle_state(struct apple_rtkit *rtk, bool ap)
 		APPLE_RTKIT_PWR_STATE_IDLE ? 0 : -EPROTO;
 }
 
-int apple_rtkit_idle_strict(struct apple_rtkit *rtk)
+/*
+ * @after_ap, if set, runs once the AP idle is acknowledged and before the IOP idle is asked for:
+ * a firmware with a second port (the DCP's secure mailbox) takes the IOP idle only once that
+ * port has gone idle too.
+ */
+int apple_rtkit_idle_strict_with(struct apple_rtkit *rtk, void (*after_ap)(void *data),
+				 void *data)
 {
 	int ret;
 
@@ -2779,6 +2785,8 @@ int apple_rtkit_idle_strict(struct apple_rtkit *rtk)
 	reinit_completion(&rtk->strict_idle_done);
 	WRITE_ONCE(rtk->strict_idle_waiting, true);
 	ret = apple_rtkit_strict_idle_state(rtk, true);
+	if (!ret && after_ap)
+		after_ap(data);
 	if (!ret)
 		ret = apple_rtkit_strict_idle_state(rtk, false);
 	if (!ret && !wait_for_completion_timeout(&rtk->strict_idle_done,
@@ -2790,6 +2798,12 @@ int apple_rtkit_idle_strict(struct apple_rtkit *rtk)
 	if (ret)
 		rtk->strict_idle_poisoned = true;
 	return ret;
+}
+EXPORT_SYMBOL_GPL(apple_rtkit_idle_strict_with);
+
+int apple_rtkit_idle_strict(struct apple_rtkit *rtk)
+{
+	return apple_rtkit_idle_strict_with(rtk, NULL, NULL);
 }
 EXPORT_SYMBOL_GPL(apple_rtkit_idle_strict);
 

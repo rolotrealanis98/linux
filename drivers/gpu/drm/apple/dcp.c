@@ -1572,7 +1572,7 @@ static void dcp_delayed_vblank(struct work_struct *work)
 static struct apple_dcp_afkep *dcp_afkep(struct apple_dcp *dcp, u8 endpoint)
 {
 	if (IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) &&
-	    dcp->v27_j714s && endpoint >= 0x20 && endpoint < 0x40 &&
+	    dcp->v27_sleep_eps && endpoint >= 0x20 && endpoint < 0x40 &&
 	    READ_ONCE(dcp->sleep_v27_ep[endpoint - 0x20]))
 		return READ_ONCE(dcp->sleep_v27_ep[endpoint - 0x20]);
 	/* The auxiliary endpoints of a desktop 26.x processor. */
@@ -1735,7 +1735,7 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
 		return;
 	/* Include traffic hidden by the fail-stop logging branch below. */
 	if (IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) &&
-	    dcp->v27_j714s && endpoint >= 0x20 &&
+	    dcp->v27_sleep_eps && endpoint >= 0x20 &&
 	    endpoint != IOMFB_ENDPOINT && !dcp_afkep(dcp, endpoint))
 		WRITE_ONCE(dcp->sleep_v27_unhandled, true);
 
@@ -1764,7 +1764,7 @@ static void dcp_recv_msg(void *cookie, u8 endpoint, u64 message)
 	}
 
 	ret = afk_receive_message(ep, message);
-	if (ret && IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) && dcp->v27_j714s)
+	if (ret && IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) && dcp->v27_sleep_eps)
 		WRITE_ONCE(dcp->sleep_v27_unhandled, true);
 }
 
@@ -6564,6 +6564,9 @@ static void dcp_t8132_ext_routes(struct apple_dcp *dcp)
 
 static int dcp_s2r_pm_register(struct apple_dcp *dcp);
 
+/* The J716s's deep sleep on 27.3, asked for on the command line (dcp-v27-sleep.inc). */
+static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags);
+
 static int dcp_platform_probe_pipe(struct platform_device *pdev)
 {
 	const struct apple_dcp_hw_data *hw = of_device_get_match_data(&pdev->dev);
@@ -6666,6 +6669,8 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 				dcp->v27_sleep_known = !!dcp->v27_sleep_tags;
 			}
 		}
+		dcp->v27_sleep_eps = dcp->v27_j714s ||
+				     dcp_v27_j716s_deep_boot(dev, dcp->v27_sleep_tags);
 	}
 	if (fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 		dcp->desktop = devm_kzalloc(dev, sizeof(*dcp->desktop), GFP_KERNEL);

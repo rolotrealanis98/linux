@@ -340,6 +340,18 @@
 			};
 		};
 	};
+
+	/*
+	 * The MagSafe 3 port's PD controller (ADT hpm5 at 0x08, port-type 0x11), as on the
+	 * J714s: no USB data path and no connector node. Its ADT features-supported is <3>
+	 * ("Power In" only), so no liquid detection. Described for the sleep, which puts it in
+	 * system power state S3 before the commit.
+	 */
+	hpm5: usb-pd@8 {
+		compatible = "apple,sn201202x";
+		reg = <0x8 SPMI_USID>;
+		apple,no-liquid-detection;
+	};
 };
 
 &usb_drd1 {
@@ -574,6 +586,14 @@
 
 /* The Neural Engine, started only after the boot loader's preload hand-off */
 #include "t6050-j714s-ane.dtsi"
+
+/*
+ * Deep sleep, as described for the J714s: the same SoC blocks, the same port controllers
+ * (hpm1, hpm2, hpm5) and the N1's warm reset with the same SMC key and value (ADT
+ * pci-bridge0 function-warm_reset 'bpli' 0x1000000, read from this machine's macOS 27.3
+ * device tree). Deep sleep stays off until the boot loader adds the SoC's sleep data.
+ */
+#include "t6050-j714s-sleep.dtsi"
 
 /*
  * Sound through the AOP, as on J813 and the J714s: its audio service runs the serializers, the

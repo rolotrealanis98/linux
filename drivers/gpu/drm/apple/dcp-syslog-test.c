@@ -20,6 +20,8 @@ static void dcp_syslog_transition_test(struct kunit *test)
 		  "ready_for_run_mode_change: initiating deferred run mode change: 2 -> 4" },
 		{ "itorContext_v4.cpp:1324",
 		  "SMC sensor TAOC is an invalid temp -127.0, using 2DVT fallback values" },
+		{ "PBlock_IRDC_v10.cpp:781", "IRDC: current_rr_mode=0" },
+		{ "PBlock_IRDC_v10.cpp:825", "IRDC Device data not valid for media RR mode 0" },
 	};
 	char message[128];
 	int i;
@@ -55,6 +57,9 @@ static void dcp_syslog_unknown_test(struct kunit *test)
 		  "SMC sensor TAOC is an invalid temp -40.0, using 2DVT fallback values" },
 		{ "itorContext_v4.cpp:1324",
 		  "2DVT thermal sensors valid, using computed virtual temperatures" },
+		/* Another refresh-rate mode is news. */
+		{ "PBlock_IRDC_v10.cpp:781", "IRDC: current_rr_mode=1" },
+		{ "PBlock_IRDC_v10.cpp:825", "IRDC Device data not valid for media RR mode 1" },
 	};
 	int i;
 

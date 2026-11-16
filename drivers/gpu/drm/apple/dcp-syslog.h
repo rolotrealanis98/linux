@@ -35,6 +35,17 @@ static inline bool dcp_h17p_syslog_is_debug(const char *context, const char *mes
 	if (!strcmp(context, "itorContext_v4.cpp:1324"))
 		return !strcmp(message, "SMC sensor TAOC is an invalid temp -127.0, "
 					"using 2DVT fallback values");
+	/*
+	 * After a firmware-driven sleep the panel's pipeline starts from power-on, and its
+	 * IR-drop compensation block then has no device data: macOS loads the panel's
+	 * compensation tables later ("set_lut_cdi valid bit set"), and nothing does under
+	 * Linux. The firmware says so with this pair on every frame it presents. Match the
+	 * exact records so another refresh-rate mode or verdict stays visible.
+	 */
+	if (!strcmp(context, "PBlock_IRDC_v10.cpp:781"))
+		return !strcmp(message, "IRDC: current_rr_mode=0");
+	if (!strcmp(context, "PBlock_IRDC_v10.cpp:825"))
+		return !strcmp(message, "IRDC Device data not valid for media RR mode 0");
 	return false;
 }
 

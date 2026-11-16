@@ -1066,6 +1066,111 @@ static void macaudio_spk_fixed_ceiling(struct kunit *test)
 	macaudio_test_expect_vols(test, &t, 0);
 }
 
+/* Every speaker volume's limit at @want */
+static void macaudio_test_expect_limits(struct kunit *test, struct macaudio_test_spk *t, long want)
+{
+	unsigned int i;
+
+	for (i = 0; i < MACAUDIO_TEST_NR_SPK; i++)
+		KUNIT_EXPECT_EQ(test, (long)macaudio_test_vol(t->vols[i])->mc.platform_max, want);
+}
+
+/*
+ * A grant that lifts the ceiling (J716): 0 dB only while granted, the
+ * ceiling back after the safe level on every withdrawal: release, lapse,
+ * system sleep, the owner gone.
+ */
+static void macaudio_spk_grant_lifts_ceiling(struct kunit *test)
+{
+	struct macaudio_platform_cfg *cfg = kunit_kzalloc(test, sizeof(*cfg), GFP_KERNEL);
+	const long ceiling = SN012776_DB(-30);
+	struct macaudio_test_vol *vol;
+	struct macaudio_test_spk t;
+	unsigned int i;
+
+	KUNIT_ASSERT_NOT_NULL(test, cfg);
+	*cfg = macaudio_j716_cfg;
+	macaudio_test_spk_card(test, &t, cfg, SN012776_0DB);
+
+	/* The limit the lease leaves on the volumes (macaudio_spk_enter_lease()) */
+	mutex_lock(&t.ma->volume_lock_mutex);
+	macaudio_vlimit_unlock(t.ma, true);
+	mutex_unlock(&t.ma->volume_lock_mutex);
+	macaudio_test_expect_limits(test, &t, ceiling);
+	macaudio_test_expect_vols(test, &t, 0);
+
+	/* No owner, no grant: the ceiling stays */
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), -EPERM);
+	macaudio_test_expect_limits(test, &t, ceiling);
+
+	/* Granted: 0 dB; released: ramped from below 0 dB to the floor, then the ceiling */
+	macaudio_test_take(test, &t);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, SPEAKER_LEASE_MAX_MS), 0);
+	KUNIT_EXPECT_EQ(test, macaudio_test_read(test, &t), 1L);
+	macaudio_test_expect_limits(test, &t, SN012776_0DB);
+	macaudio_test_expect_vols(test, &t, SN012776_0DB);
+	/* A renewal changes nothing */
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, SPEAKER_LEASE_MAX_MS), 0);
+	macaudio_test_expect_limits(test, &t, SN012776_0DB);
+	macaudio_test_record(&t);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 0), 0);
+	for (i = 0; i < MACAUDIO_TEST_NR_SPK; i++) {
+		vol = macaudio_test_vol(t.vols[i]);
+		macaudio_test_expect_ramp(test, &t, i);
+		KUNIT_EXPECT_GT(test, vol->hist[0], ceiling);
+	}
+	macaudio_test_expect_vols(test, &t, 0);
+	macaudio_test_expect_limits(test, &t, ceiling);
+	KUNIT_EXPECT_FALSE(test, t.ma->spk_ceiling_lifted);
+
+	/* The lease runs out */
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, SPEAKER_LEASE_MIN_MS), 0);
+	macaudio_test_expect_limits(test, &t, SN012776_0DB);
+	msleep(3 * SPEAKER_LEASE_MIN_MS);
+	macaudio_test_settle(t.ma);
+	macaudio_test_expect_vols(test, &t, 0);
+	macaudio_test_expect_limits(test, &t, ceiling);
+
+	/* A system sleep */
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), 0);
+	macaudio_test_expect_limits(test, &t, SN012776_0DB);
+	macaudio_pm_notify(&t.ma->pm_nb, PM_SUSPEND_PREPARE, NULL);
+	macaudio_test_expect_vols(test, &t, 0);
+	macaudio_test_expect_limits(test, &t, ceiling);
+	macaudio_pm_notify(&t.ma->pm_nb, PM_POST_SUSPEND, NULL);
+	macaudio_test_expect_limits(test, &t, ceiling);
+
+	/* The owner's file closes */
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), -ETIMEDOUT);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), 0);
+	macaudio_test_expect_limits(test, &t, SN012776_0DB);
+	macaudio_spk_unlock(t.spk);
+	macaudio_test_expect_vols(test, &t, 0);
+	macaudio_test_expect_limits(test, &t, ceiling);
+	KUNIT_EXPECT_FALSE(test, READ_ONCE(t.ma->spk_floor_failed));
+}
+
+/* A ceiling that does not go back on is a failed floor: no more speaker playback */
+static void macaudio_spk_lifted_ceiling_not_restored_fails_the_floor(struct kunit *test)
+{
+	struct macaudio_platform_cfg *cfg = kunit_kzalloc(test, sizeof(*cfg), GFP_KERNEL);
+	struct macaudio_test_spk t;
+
+	KUNIT_ASSERT_NOT_NULL(test, cfg);
+	*cfg = macaudio_j716_cfg;
+	macaudio_test_spk_card(test, &t, cfg, SN012776_0DB);
+	macaudio_test_take(test, &t);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, SPEAKER_LEASE_MAX_MS), 0);
+	/* One amp's writes fail from here: its safe level, then its clip */
+	macaudio_test_vol(t.vols[0])->fail = -EIO;
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 0), 0);
+	KUNIT_EXPECT_TRUE(test, READ_ONCE(t.ma->spk_floor_failed));
+	KUNIT_EXPECT_TRUE(test, t.ma->spk_ceiling_lifted);
+	KUNIT_EXPECT_EQ(test, macaudio_test_write(test, &t, 30), -EIO);
+	KUNIT_EXPECT_EQ(test, macaudio_test_read(test, &t), 0L);
+}
+
 struct macaudio_test_unlock {
 	struct snd_kcontrol *spk;
 	struct completion done;
@@ -1355,6 +1460,8 @@ static struct kunit_case macaudio_protection_cases[] = {
 	KUNIT_CASE(macaudio_spk_hard_withdrawals_do_not_ramp),
 	KUNIT_CASE(macaudio_spk_j700_does_not_ramp),
 	KUNIT_CASE(macaudio_spk_fixed_ceiling),
+	KUNIT_CASE(macaudio_spk_grant_lifts_ceiling),
+	KUNIT_CASE(macaudio_spk_lifted_ceiling_not_restored_fails_the_floor),
 	KUNIT_CASE(macaudio_spk_floor_waits_for_the_resume),
 	KUNIT_CASE(macaudio_spk_grant_needs_d0),
 	{}

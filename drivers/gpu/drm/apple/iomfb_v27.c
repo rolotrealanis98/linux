@@ -2,6 +2,7 @@
 /* Copyright The Asahi Linux Contributors */
 /* Copyright 2026 Aurora Silicon */
 
+#include <linux/of.h>
 #include <linux/unaligned.h>
 #include <linux/spinlock.h>
 
@@ -311,6 +312,75 @@ const struct dcp_method_entry *iomfb_v27_methods_j714s(struct device *dev,
 	/* macOS 27 submits every swap with A407 (the H17P table's A408 is not used). */
 	memcpy(table[dcpep_swap_submit].tag, "A407", sizeof(table[dcpep_swap_submit].tag));
 	return table;
+}
+
+/*
+ * The firmware 27 sleep's tags on the J714s's DCP firmware 27.0 (26A428), the ones it was
+ * brought up with. A500 is in no table: the dispatch compares 'A500' and 'A500' | 1 in code
+ * (rtxt 0x41a6a48: mov w9, #0x3030; movk w9, #0x4135, lsl #16).
+ */
+static const struct iomfb_v27_sleep_tags v27_sleep_tags_27_0 = {
+	.build = "27.0 (J714s)",
+	.tag = {
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_SET_POWER_STATE, "A484"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_AP_LINK, "A500"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_CFG_414, "A414"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_QUERY_478, "A489"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_SET_476, "A487"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_IS_MAIN_DISPLAY, "A412"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_A115, "A115"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_A442, "A442"),
+	},
+};
+
+/*
+ * The same calls on the J716s's own DCP firmware 27.3 (t605xdcp), each found as the 27.3
+ * handler that matches 27.0's:
+ *
+ * - AP link: A550. 27.3 compares 'A550' and 'A550' | 1 in the code where 27.0 compares
+ *   'A500' (rtxt 0x41ad070: mov w9, #0x3530; movk w9, #0x4135, lsl #16; 27.0 at 0x41a6a48
+ *   with #0x3030). The handlers, 27.0 0x41b85f0 and 27.3 0x41bee54, are the same
+ *   instructions apart from one pointer offset, and both want at least 4 bytes in. 27.2 on
+ *   the T8142 moved it the same way (t8142dcp 26B123, 0x1df68c).
+ * - set_power_state: A535 (27.0 A484 0x41f39f4, 27.3 0x41fa820, the same handler as 27.2's
+ *   A534). A plain power-on, {1, 0...} out of band, answers 01 00.. on a J716s.
+ * - A464 (A414; 0x41ffaf0): 8 zero bytes in, answered 01 on a J716s. A540 (A489; 0x41fa4f4),
+ *   A538 (A487; 0x41fa628; u32 1 in on a J716s) and A462 (A412; 0x41ffd20) are sent with the
+ *   same arguments by every J716s client open.
+ * - A115 (0x4258314, 0.98 alike to 27.0's 0x4250298) and A492 (A442; out of band,
+ *   0x41fd7e4, 0.95 alike to 27.0's 0x41f6868) by handler likeness only: never sent on 27.3.
+ *
+ * Not yet run on 27.3: set_power_state(0), its flags form and the command context, and A550.
+ */
+static const struct iomfb_v27_sleep_tags v27_sleep_tags_27_3 = {
+	.build = "27.3 (J716s)",
+	.tag = {
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_SET_POWER_STATE, "A535"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_AP_LINK, "A550"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_CFG_414, "A464"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_QUERY_478, "A540"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_PIPE_SET_476, "A538"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_IS_MAIN_DISPLAY, "A462"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_A115, "A115"),
+		IOMFB_V27_SLEEP_TAG(V27_SLEEP_A442, "A492"),
+	},
+};
+
+/*
+ * The sleep's tags for a T6050 display processor on a build and board they were read for:
+ * the J714s on 27.0 and the J716s on 27.3. NULL anywhere else, other boards on the same
+ * build included: their sleep sends nothing.
+ */
+const struct iomfb_v27_sleep_tags *iomfb_v27_sleep_tags(struct device *dev, const char *compat)
+{
+	if (!of_device_is_compatible(dev->of_node, "apple,t6050-dcp") &&
+	    !of_device_is_compatible(dev->of_node, "apple,t6050-dcpext"))
+		return NULL;
+	if (!strcmp(compat, "27.0.0") && of_machine_is_compatible("apple,j714s"))
+		return &v27_sleep_tags_27_0;
+	if (!strcmp(compat, "27.3.0") && of_machine_is_compatible("apple,j716s"))
+		return &v27_sleep_tags_27_3;
+	return NULL;
 }
 
 /*

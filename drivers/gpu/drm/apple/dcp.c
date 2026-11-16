@@ -6591,6 +6591,16 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 		/* Checked by dcp_check_firmware_version(). */
 		dcp_read_fw_version(dev, "apple,firmware-compat", compat_str);
 		dcp->v27_methods = iomfb_v27_methods(compat_str);
+		dcp->v27_sleep_tags = iomfb_v27_sleep_tags(dev, compat_str);
+		if (dcp->v27_sleep_tags) {
+			const char (*t)[4] = dcp->v27_sleep_tags->tag;
+
+			dev_info(dev, "firmware 27 sleep tags %s: set_power_state %.4s, AP link %.4s, display stage %.4s %.4s %.4s %.4s, %.4s, %.4s\n",
+				 dcp->v27_sleep_tags->build, t[V27_SLEEP_SET_POWER_STATE],
+				 t[V27_SLEEP_AP_LINK], t[V27_SLEEP_PIPE_CFG_414],
+				 t[V27_SLEEP_PIPE_QUERY_478], t[V27_SLEEP_PIPE_SET_476],
+				 t[V27_SLEEP_IS_MAIN_DISPLAY], t[V27_SLEEP_A115], t[V27_SLEEP_A442]);
+		}
 		if (dcp->v27_j714s) {
 			const struct dcp_method_entry *own =
 				iomfb_v27_methods_j714s(dev, dcp->v27_methods);
@@ -6598,7 +6608,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 			if (own) {
 				dcp->v27_methods = own;
 				dcp->v27_a407 = true;
-				dcp->v27_sleep_known = true;
+				dcp->v27_sleep_known = !!dcp->v27_sleep_tags;
 			}
 		}
 	}

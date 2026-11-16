@@ -66,7 +66,7 @@ struct centauri_t6050_wifi {
 	bool scan_abort, connect_abort;
 	u8 scan_sequence;
 	bool connecting, connected, connect_event, disconnect_event;
-	bool disconnect_pending;
+	bool disconnect_pending, connect_open;
 	u16 connect_status, scan_status, disconnect_status;
 	struct ieee80211_channel *connect_channel;
 	u8 bssid[ETH_ALEN], connect_payload[1024], request_ie[256];
@@ -1304,14 +1304,37 @@ static int select_rsn(const u8 *body, size_t size, u32 akm, u8 *selected)
 
 /*
  * The connect command carries one authentication and AKM pair, in the bytes
- * at 0x46 and 0x47: WPA2-Personal is open authentication with AKM 4 and the
- * PMK at 0x4c, WPA3-Personal is SAE authentication with AKM 8 and the
- * password in TLV 313, which the firmware runs SAE from.
+ * at 0x46 and 0x47, and the pairwise cipher in the 16 bits at 0x48:
+ * WPA2-Personal is open authentication with AKM 4 and the PMK at 0x4c,
+ * WPA3-Personal is SAE authentication with AKM 8 and the password in TLV 313,
+ * which the firmware runs SAE from; both use CCMP (4). The values are the
+ * firmware's AciAuthTypeEnum and AciAkmTypeEnum (their names are in the enum
+ * table of the firmware image's "_wcl" section). A network without security
+ * is open authentication with AKM 0 (AciAkmNone) and cipher 0: macOS 27.3
+ * (ACIConnectionAdapter::connectAp) leaves the three fields, the key and the
+ * RSN element TLV out for such a join, and sends no TLV 316 either.
  */
 #define CONNECT_AUTH_OPEN 0
 #define CONNECT_AUTH_SAE 3
+#define CONNECT_AKM_NONE 0
 #define CONNECT_AKM_PSK 4
 #define CONNECT_AKM_SAE 8
+#define CONNECT_CIPHER_NONE 0
+#define CONNECT_CIPHER_CCMP 4
+
+/*
+ * Whether the request is for a network without security: no RSN element, no
+ * ciphers, no AKM and no privacy (static WEP sets privacy and a WEP cipher,
+ * and stays refused).
+ */
+static bool connect_is_open(const struct cfg80211_connect_params *params)
+{
+	return !params->privacy && !params->crypto.n_ciphers_pairwise &&
+	       !params->crypto.cipher_group && !params->crypto.n_akm_suites &&
+	       !params->crypto.psk && !params->crypto.sae_pwd_len &&
+	       params->auth_type != NL80211_AUTHTYPE_SHARED_KEY &&
+	       !cfg80211_find_ie(WLAN_EID_RSN, params->ie, params->ie_len);
+}
 
 /* The AKMs the connect command can name, in order of preference. */
 static const u32 connect_akms[] = { WLAN_AKM_SUITE_SAE, WLAN_AKM_SUITE_PSK };
@@ -1426,27 +1449,32 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 		params->channel ?: params->channel_hint;
 	struct cfg80211_bss *bss;
 	struct device *dev = &wifi->control->pdev->dev;
-	const u8 *rsn;
+	const u8 *rsn = NULL;
 	u8 rsn_body[255], target[255], ssid[35];
 	u8 *payload = wifi->connect_payload;
-	size_t size = 130, rsn_size, rsn_prefix, rsn_tail;
+	size_t size = 130, rsn_size = 0, rsn_prefix, rsn_tail;
 	int ret = 0, offset, band;
-	bool sae, mfpc;
+	bool sae = false, mfpc = false, open = connect_is_open(params);
 	u8 password[2 + SAE_PASSWORD_MAX_LEN];
-	u32 akm;
+	u32 akm = 0;
 
 	if (!params->ssid_len || params->ssid_len > 32 ||
-	    params->crypto.sae_pwd_len > SAE_PASSWORD_MAX_LEN ||
-	    params->crypto.n_ciphers_pairwise != 1 ||
-	    params->crypto.ciphers_pairwise[0] != WLAN_CIPHER_SUITE_CCMP ||
-	    params->crypto.cipher_group != WLAN_CIPHER_SUITE_CCMP ||
-	    params->ie_len > sizeof(wifi->request_ie)) {
-		dev_dbg(dev, "connect refused: %d pairwise ciphers, first %08x, group %08x, %zu bytes of elements\n",
-			params->crypto.n_ciphers_pairwise,
+	    params->ie_len > sizeof(wifi->request_ie) ||
+	    (!open &&
+	     (params->crypto.sae_pwd_len > SAE_PASSWORD_MAX_LEN ||
+	      params->crypto.n_ciphers_pairwise != 1 ||
+	      params->crypto.ciphers_pairwise[0] != WLAN_CIPHER_SUITE_CCMP ||
+	      params->crypto.cipher_group != WLAN_CIPHER_SUITE_CCMP))) {
+		dev_dbg(dev, "connect refused: privacy %d, %d pairwise ciphers, first %08x, group %08x, %d AKMs, auth type %d, %zu bytes of elements\n",
+			params->privacy, params->crypto.n_ciphers_pairwise,
 			params->crypto.ciphers_pairwise[0],
-			params->crypto.cipher_group, params->ie_len);
+			params->crypto.cipher_group,
+			params->crypto.n_akm_suites, params->auth_type,
+			params->ie_len);
 		return -EOPNOTSUPP;
 	}
+	if (open)
+		goto security_done;
 	rsn = cfg80211_find_ie(WLAN_EID_RSN, params->ie, params->ie_len);
 	if (!rsn) {
 		dev_dbg(dev, "connect refused: no RSN element\n");
@@ -1476,6 +1504,7 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 	rsn_size = ret;
 	sae = akm == WLAN_AKM_SUITE_SAE;
 	ret = 0;
+security_done:
 	mutex_lock(&wifi->lock);
 	if (READ_ONCE(wifi->stopping)) {
 		ret = -ENODEV;
@@ -1492,7 +1521,8 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 	} else {
 		bss = cfg80211_get_bss(wiphy, channel, bssid, params->ssid,
 				       params->ssid_len, IEEE80211_BSS_TYPE_ESS,
-				       IEEE80211_PRIVACY_ON);
+				       open ? IEEE80211_PRIVACY_OFF :
+					      IEEE80211_PRIVACY_ON);
 		if (!bss) {
 			ret = -ENOENT;
 			goto out;
@@ -1506,7 +1536,10 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 		goto out;
 	band = ret;
 	ret = 0;
-	/* 6 GHz admits WPA3-Personal only with management frame protection. */
+	/*
+	 * 6 GHz admits WPA3-Personal only with management frame protection
+	 * (and no network without security).
+	 */
 	if (channel->band == NL80211_BAND_6GHZ && (!sae || !mfpc)) {
 		dev_dbg(dev, "connect refused: 6 GHz with AKM %08x, MFPC %d\n",
 			akm, mfpc);
@@ -1522,11 +1555,16 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 	payload[7] = ieee80211_frequency_to_channel(channel->center_freq);
 
 	payload[8] = band;
-	payload[0x46] = sae ? CONNECT_AUTH_SAE : CONNECT_AUTH_OPEN;
-	payload[0x47] = sae ? CONNECT_AKM_SAE : CONNECT_AKM_PSK;
-
-	put_unaligned_le16(4, payload + 0x48);
-	if (!sae) {
+	if (open) {
+		payload[0x46] = CONNECT_AUTH_OPEN;
+		payload[0x47] = CONNECT_AKM_NONE;
+		put_unaligned_le16(CONNECT_CIPHER_NONE, payload + 0x48);
+	} else {
+		payload[0x46] = sae ? CONNECT_AUTH_SAE : CONNECT_AUTH_OPEN;
+		payload[0x47] = sae ? CONNECT_AKM_SAE : CONNECT_AKM_PSK;
+		put_unaligned_le16(CONNECT_CIPHER_CCMP, payload + 0x48);
+	}
+	if (!open && !sae) {
 		put_unaligned_le16(32, payload + 0x4a);
 		memcpy(payload + 0x4c, params->crypto.psk, 32);
 	}
@@ -1539,7 +1577,8 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 	ssid[2] = params->ssid_len;
 	memcpy(ssid + 3, params->ssid, params->ssid_len);
 	append_tlv(payload, &size, 342, ssid, 3 + params->ssid_len);
-	append_tlv(payload, &size, WLAN_EID_RSN, rsn_body, rsn_size);
+	if (!open)
+		append_tlv(payload, &size, WLAN_EID_RSN, rsn_body, rsn_size);
 	if (sae) {
 		put_unaligned_le16(params->crypto.sae_pwd_len, password);
 		memcpy(password + 2, params->crypto.sae_pwd,
@@ -1549,19 +1588,31 @@ static int wifi_connect(struct wiphy *wiphy, struct net_device *netdev,
 		memzero_explicit(password, sizeof(password));
 	}
 
-	append_tlv(payload, &size, 316, &roaming, 1);
+	if (!open)
+		append_tlv(payload, &size, 316, &roaming, 1);
 	append_tlv(payload, &size, 376, mld_defaults, sizeof(mld_defaults));
 	wifi->connect_size = size;
+	wifi->connect_open = open;
 
-	rsn_prefix = rsn - params->ie;
-	rsn_tail = rsn_prefix + 2 + rsn[1];
-	memcpy(wifi->request_ie, params->ie, rsn_prefix);
-	wifi->request_ie[rsn_prefix] = WLAN_EID_RSN;
-	wifi->request_ie[rsn_prefix + 1] = rsn_size;
-	memcpy(wifi->request_ie + rsn_prefix + 2, rsn_body, rsn_size);
-	memcpy(wifi->request_ie + rsn_prefix + 2 + rsn_size,
-	       params->ie + rsn_tail, params->ie_len - rsn_tail);
-	wifi->request_ie_size = params->ie_len - rsn[1] + rsn_size;
+	if (open) {
+		/* No key in this payload: show what the firmware is given. */
+		dev_info(dev, "Wi-Fi join without security on %u MHz: %zu-byte connect command\n",
+			 channel->center_freq, size);
+		print_hex_dump(KERN_INFO, "centauri open join: ",
+			       DUMP_PREFIX_OFFSET, 16, 1, payload, size, false);
+		memcpy(wifi->request_ie, params->ie, params->ie_len);
+		wifi->request_ie_size = params->ie_len;
+	} else {
+		rsn_prefix = rsn - params->ie;
+		rsn_tail = rsn_prefix + 2 + rsn[1];
+		memcpy(wifi->request_ie, params->ie, rsn_prefix);
+		wifi->request_ie[rsn_prefix] = WLAN_EID_RSN;
+		wifi->request_ie[rsn_prefix + 1] = rsn_size;
+		memcpy(wifi->request_ie + rsn_prefix + 2, rsn_body, rsn_size);
+		memcpy(wifi->request_ie + rsn_prefix + 2 + rsn_size,
+		       params->ie + rsn_tail, params->ie_len - rsn_tail);
+		wifi->request_ie_size = params->ie_len - rsn[1] + rsn_size;
+	}
 	WRITE_ONCE(wifi->connect_abort, false);
 	wifi->connecting = true;
 	wifi->connect_status = 0;
@@ -1592,7 +1643,10 @@ static struct cfg80211_bss *connected_bss(struct centauri_t6050_wifi *wifi)
 	memcpy(ie + 2, wifi->ssid, wifi->ssid_len);
 	return cfg80211_inform_bss(wifi->wiphy, wifi->connect_channel,
 				   CFG80211_BSS_FTYPE_UNKNOWN, wifi->bssid, 0,
-				   WLAN_CAPABILITY_ESS | WLAN_CAPABILITY_PRIVACY,
+				   WLAN_CAPABILITY_ESS |
+					   (wifi->connect_open ?
+						    0 :
+						    WLAN_CAPABILITY_PRIVACY),
 				   100, ie, 2 + wifi->ssid_len, -95 * 100,
 				   GFP_KERNEL);
 }
@@ -1848,8 +1902,10 @@ static void connect_worker(struct work_struct *work)
 				     NULL, 0, status, GFP_KERNEL,
 				     NL80211_TIMEOUT_UNSPECIFIED);
 	if (status == WLAN_STATUS_SUCCESS && !READ_ONCE(wifi->stopping)) {
-		cfg80211_port_authorized(wifi->netdev, wifi->bssid, NULL, 0,
-					 GFP_KERNEL);
+		/* The firmware ran the handshake; without security there is none. */
+		if (!wifi->connect_open)
+			cfg80211_port_authorized(wifi->netdev, wifi->bssid,
+						 NULL, 0, GFP_KERNEL);
 		netif_carrier_on(wifi->netdev);
 		if (wifi->data_rings_open & BIT(5))
 			netif_wake_queue(wifi->netdev);

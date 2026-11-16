@@ -351,9 +351,14 @@ static const struct iomfb_v27_sleep_tags v27_sleep_tags_27_0 = {
  *   0x41fd7e4, 0.95 alike to 27.0's 0x41f6868) by handler likeness only: never sent on 27.3.
  *
  * Not yet run on 27.3: set_power_state(0), its flags form and the command context, and A550.
+ *
+ * A492 takes zeros past its first 16 bytes: on 27.2 (K116s, the same handler as 27.3's by the
+ * +50 move) it reads an index count and a block size where 27.0's A442 had the 0xaa filler,
+ * rejects 0xaaaaaaaa there and accepts zeros (aurora-silicon/linux#2075).
  */
 static const struct iomfb_v27_sleep_tags v27_sleep_tags_27_3 = {
 	.build = "27.3 (J716s)",
+	.a442_zeros = true,
 	.tag = {
 		IOMFB_V27_SLEEP_TAG(V27_SLEEP_SET_POWER_STATE, "A535"),
 		IOMFB_V27_SLEEP_TAG(V27_SLEEP_AP_LINK, "A550"),

@@ -919,6 +919,9 @@ static void iomfb_v27_sleep_start(struct apple_dcp *dcp,
 		if (rpc->a442_key) {
 			memset(in + 80, 0, 12);
 			in[84] = 0x20;
+		} else if (dcp->v27_sleep_tags->a442_zeros) {
+			/* No indexes and no block where this build reads their count and size. */
+			memset(in + 16, 0, sizeof(in) - 16);
 		}
 		dcp_push(dcp, true, &a442, sizeof(in), 4100, in, iomfb_v27_a442_done, NULL);
 	}

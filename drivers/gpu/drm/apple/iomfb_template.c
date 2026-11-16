@@ -4127,7 +4127,7 @@ int DCP_FW_NAME(iomfb_modeset)(struct apple_dcp *dcp,
 	 * itself once frames arrive; macOS sends no mode set then, and one
 	 * sent before the link is up waits out the firmware's timeout.
 	 */
-	keep_mode = dcp->v27_j714s && xchg(&dcp->v27_keep_mode, false) &&
+	keep_mode = dcp->v27_sleep_eps && xchg(&dcp->v27_keep_mode, false) &&
 		    dcp->mode.color_mode_id == mode->color_mode_id &&
 		    dcp->mode.timing_mode_id == mode->timing_mode_id;
 #endif

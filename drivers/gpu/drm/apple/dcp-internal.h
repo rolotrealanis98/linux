@@ -761,9 +761,16 @@ struct apple_dcp {
 	/*
 	 * The firmware 27 deep sleep's display step is known for this processor: the J714s on the
 	 * 27.0 table, whose copy carries the sleep's A500 (iomfb_v27_methods_j714s()). It relies
-	 * on sleep_v27_ep, which only a v27_j714s processor fills.
+	 * on sleep_v27_ep, which only a v27_sleep_eps processor fills. The J716s on 27.3 runs it
+	 * only with appledrm.j716s_deep_sleep (dcp_v27_j716s_deep()).
 	 */
 	bool v27_sleep_known;
+	/*
+	 * The sleep's endpoints are tracked in sleep_v27_ep and its session exchange is answered:
+	 * the J714s (v27_j714s), and the J716s on 27.3 booted with appledrm.j716s_deep_sleep=1.
+	 * Its panel's AV and DP services stay the J714s's own.
+	 */
+	bool v27_sleep_eps;
 	/*
 	 * J716s on 27.3: what DPMS off left of the internal display (appledrm.j716s_sleep): 0 on,
 	 * 1 off on the running firmware, 2 the firmware stopped and its domain powered down,

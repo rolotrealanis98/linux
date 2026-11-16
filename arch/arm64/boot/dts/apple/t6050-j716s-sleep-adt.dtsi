@@ -1,0 +1,23 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * The J716s's (MacBook Pro 16-inch, M5 Pro) skipped pins and wake sources for the deep sleep,
+ * which the boot loader fills from the ADT (aura: dt_set_t6050_sleep(), from /arm-io/gpio0
+ * no-restore-gpio-pins and /arm-io/pmgr ap-wake-sources, the GFX die's sources from index 320 on).
+ * Set here with this machine's ADT values (macOS 27.3, 26C5035r) for a boot loader that does not
+ * fill them yet. They are the J714s's values, number for number.
+ */
+
+&sleep {
+	/* /arm-io/gpio0 no-restore-gpio-pins: 6 7 5 141 112 */
+	apple,pinctrl-skip-pins = <5 6 7 112 141>;
+	/*
+	 * /arm-io/pmgr ap-wake-sources: the AOP's GPIO 4 and 6 and outboxes 0 and 2, AOP2's
+	 * outbox 2, the AOP's wakeup, the NUB's wakeup, GPIO 2 and 6, watchdog, wake time and
+	 * SPMI0 software interrupts 0, 1 and 3, the SMC's wakeup and outbox, ATC0-3's CIO and USB
+	 * wakeups, the MTP's DockChannel AP0 interrupt and outbox, AOP2's wakeup
+	 */
+	apple,wake-enable = <16 18 28 30 38 39 62 65 69 71 72 73 74 76 122 127
+			     147 148 149 150 151 152 153 154 171 183 290>;
+	/* GFX_DIE.NUB.WakeupAP (ADT index 321) */
+	apple,wake-enable-gfx = <1>;
+};

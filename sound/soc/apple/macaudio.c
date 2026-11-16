@@ -192,6 +192,17 @@ struct macaudio_platform_cfg {
 	 * granted lease runs them at safe_vol, its operating gain.
 	 */
 	bool spk_fixed_ceiling;
+	/*
+	 * SN012776 only, not with spk_fixed_ceiling. A granted lease runs the
+	 * amps at 0 dB (or speaker_max_db, if lower), above max_vol: the
+	 * protection engine's tuning assumes the amps' full scale and it
+	 * attenuates in its own signal path (speakerguardd v2 refuses any other
+	 * operating volume). max_vol still bounds "Speaker Volume Unlock" and
+	 * the lease whenever it is not granted: the grant lifts the volumes'
+	 * limit just before the amps go up, and every withdrawal puts it back
+	 * once they are at the safe level.
+	 */
+	bool grant_lifts_ceiling;
 };
 
 static const char *volume_control_names[] = {
@@ -285,6 +296,11 @@ struct macaudio_snd_data {
 	bool spk_granted;
 	/* The amps are at the operating gain (spk_mutex) */
 	bool spk_active;
+	/*
+	 * grant_lifts_ceiling: the volumes' limit is (or may partly be) above
+	 * the ceiling, from a grant, until the floor puts it back (spk_mutex)
+	 */
+	bool spk_ceiling_lifted;
 	/* A safe level that did not take: speaker playback refused until reload */
 	bool spk_floor_failed;
 	/* The lease ran out: the owner's next write is refused with -ETIMEDOUT */
@@ -1046,6 +1062,65 @@ static void macaudio_sw_gain_stop_work(struct work_struct *work)
  * fixed, known gain; all attenuation is the engine's, in its signal path.
  */
 
+/*
+ * The SN012776 operating gain of a granted lease, in dB (<= 0): the fixed
+ * ceiling, 0 dB where the grant lifts the ceiling (only lowered by
+ * speaker_max_db), else the unlocked ceiling.
+ */
+static int macaudio_spk_op_db(const struct macaudio_snd_data *ma)
+{
+	if (ma->cfg->spk_fixed_ceiling)
+		return ma->cfg->safe_vol;
+	if (ma->cfg->grant_lifts_ceiling)
+		return speaker_max_db < 0 ? max(speaker_max_db, -100) : 0;
+	return macaudio_max_vol(ma);
+}
+
+/*
+ * Every speaker volume's limit at @max, and a volume above it clipped to it.
+ * Only on grant_lifts_ceiling machines, whose volumes are SN012776 mixer
+ * controls. Returns 0, or a negative error if any limit or clip failed.
+ *
+ * Context: spk_mutex held, leased: userspace cannot write the volumes.
+ */
+static int macaudio_spk_set_limit(struct macaudio_snd_data *ma, long max)
+{
+	struct snd_ctl_elem_value *uval = ma->spk_uval;
+	struct soc_mixer_control *mc;
+	struct snd_kcontrol *kctl;
+	int ret, err = 0;
+	unsigned int i;
+
+	lockdep_assert_held(&ma->spk_mutex);
+
+	if (!uval || !ma->spk_nr_vols)
+		return -EINVAL;
+
+	for (i = 0; i < ma->spk_nr_vols; i++) {
+		kctl = ma->spk_vols[i];
+		mc = (struct soc_mixer_control *)kctl->private_value;
+		if (max <= 0 || max > mc->max - mc->min) {
+			err = -EINVAL;
+			continue;
+		}
+		mc->platform_max = max;
+		memset(uval, 0, sizeof(*uval));
+		uval->id = kctl->id;
+		ret = kctl->get(kctl, uval);
+		if (ret >= 0 && uval->value.integer.value[0] > max) {
+			uval->value.integer.value[0] = max;
+			uval->value.integer.value[1] = max;
+			ret = kctl->put(kctl, uval);
+		}
+		if (ret < 0) {
+			dev_err(ma->card.dev, "Failed to limit %s to %ld: %d\n",
+				kctl->id.name, max, ret);
+			err = ret;
+		}
+	}
+	return err;
+}
+
 static long macaudio_spk_gain(const struct macaudio_snd_data *ma, bool granted)
 {
 	switch (ma->cfg->amp) {
@@ -1054,9 +1129,11 @@ static long macaudio_spk_gain(const struct macaudio_snd_data *ma, bool granted)
 	case AMP_SN012776:
 		if (!granted)
 			return 0;
-		/* The volumes' limit is the ceiling, so is the operating gain */
-		return ma->cfg->spk_fixed_ceiling ? SN012776_DB(ma->cfg->safe_vol) :
-						    SN012776_DB(macaudio_max_vol(ma));
+		/*
+		 * The volumes' limit is the ceiling, so is the operating gain;
+		 * unless the grant lifts it (grant_lifts_ceiling)
+		 */
+		return SN012776_DB(macaudio_spk_op_db(ma));
 	case AMP_MAX98360A:
 		return granted ? MAX98360A_DB(macaudio_max_vol(ma)) :
 				 MAX98360A_DB(ma->cfg->safe_vol);
@@ -1181,8 +1258,7 @@ static bool macaudio_spk_ramps(const struct macaudio_snd_data *ma)
 static void macaudio_spk_ramp_down(struct macaudio_snd_data *ma, ktime_t deadline)
 {
 	ktime_t next = ktime_get();
-	int op_db = ma->cfg->spk_fixed_ceiling ? ma->cfg->safe_vol :
-						 macaudio_max_vol(ma);
+	int op_db = macaudio_spk_op_db(ma);
 	unsigned int i;
 	s64 wait;
 
@@ -1190,10 +1266,11 @@ static void macaudio_spk_ramp_down(struct macaudio_snd_data *ma, ktime_t deadlin
 
 	for (i = 0; i < ARRAY_SIZE(macaudio_spk_ramp_db); i++) {
 		/*
-		 * The operating gain is the machine's ceiling: start below it. The
-		 * steps are absolute, so a machine whose ceiling is under the first
-		 * step (the J716's -30 dB) must not ramp up to -2 dB under a playing
-		 * stream when its owner lets go.
+		 * Start below the operating gain. The steps are absolute, so a
+		 * machine granted under the first step (a -30 dB ceiling that the
+		 * grant does not lift) must not ramp up to -2 dB under a playing
+		 * stream when its owner lets go. A lifted ceiling stays lifted until
+		 * the floor, so the steps from 0 dB down are within the limit.
 		 */
 		if (macaudio_spk_ramp_db[i] >= op_db)
 			continue;
@@ -1343,6 +1420,21 @@ static void __macaudio_spk_floor(struct macaudio_snd_data *ma, const char *reaso
 		dev_crit(ma->card.dev,
 			 "tweeter safe high-pass not set on every amp: speaker playback refused\n");
 	}
+	/*
+	 * Then the ceiling the grant lifted, which also clips to it any amp the
+	 * safe level missed. A ceiling that does not take is a failed floor.
+	 */
+	if (ma->spk_ceiling_lifted) {
+		if (macaudio_spk_set_limit(ma, SN012776_DB(macaudio_max_vol(ma))) < 0) {
+			WRITE_ONCE(ma->spk_floor_failed, true);
+			dev_crit(ma->card.dev,
+				 "speaker volume ceiling not set again on every amp: speaker playback refused\n");
+		} else {
+			ma->spk_ceiling_lifted = false;
+			dev_info(ma->card.dev, "Speaker volume ceiling back at %d dB\n",
+				 macaudio_max_vol(ma));
+		}
+	}
 	if (!powered)
 		snd_power_unref(card);
 
@@ -1431,6 +1523,19 @@ static int macaudio_spk_grant(struct macaudio_snd_data *ma, long ms)
 		macaudio_spk_floor(ma, "tweeter high-pass not set");
 		return ret;
 	}
+	/*
+	 * The ceiling lifts for this lease only, just before the amps go up;
+	 * every withdrawal puts it back after the safe level. Marked first, so
+	 * that a lift that fails part way is put back too.
+	 */
+	if (ma->cfg->grant_lifts_ceiling) {
+		ma->spk_ceiling_lifted = true;
+		ret = macaudio_spk_set_limit(ma, macaudio_spk_gain(ma, true));
+		if (ret < 0) {
+			macaudio_spk_floor(ma, "operating gain limit not set");
+			return ret;
+		}
+	}
 	ret = macaudio_spk_set_gain(ma, true);
 	if (ret < 0) {
 		macaudio_spk_floor(ma, "operating gain not set");
@@ -1453,6 +1558,10 @@ static int macaudio_spk_grant(struct macaudio_snd_data *ma, long ms)
 			 refused);
 	else
 		dev_info(ma->card.dev, "Speaker protection granted\n");
+	if (ma->spk_ceiling_lifted)
+		dev_info(ma->card.dev,
+			 "Speaker volume ceiling lifted for the lease: amps at %d dB (ceiling %d dB)\n",
+			 macaudio_spk_op_db(ma), macaudio_max_vol(ma));
 	if (ma->spk_nr_hpfs && !ma->spk_xover)
 		dev_info(ma->card.dev,
 			 "No crossover declared: tweeter high-pass stays at the safe corner\n");
@@ -1785,7 +1894,11 @@ static int macaudio_spk_enter_lease(struct macaudio_snd_data *ma)
 		return ret;
 	}
 
-	/* The volumes stay at the safe level: the ceiling no longer applies */
+	/*
+	 * The volumes stay at the safe level: the lock's limit goes up to the
+	 * unlocked ceiling (0 dB, or max_vol), which a grant_lifts_ceiling
+	 * grant lifts for its lease only
+	 */
 	mutex_lock(&ma->volume_lock_mutex);
 	macaudio_vlimit_unlock(ma, true);
 	mutex_unlock(&ma->volume_lock_mutex);
@@ -2222,6 +2335,10 @@ static int macaudio_spk_take_volumes(struct macaudio_snd_data *ma)
 	unsigned int nr = 0;
 
 	if (!name)
+		return -EINVAL;
+	/* The lifted limit is an SN012776 mixer control's, over a ceiling that moves */
+	if (ma->cfg->grant_lifts_ceiling &&
+	    (ma->cfg->amp != AMP_SN012776 || ma->cfg->spk_fixed_ceiling))
 		return -EINVAL;
 
 	list_for_each_entry(kctl, &ma->card.snd_card->controls, list)
@@ -4146,9 +4263,13 @@ struct macaudio_platform_cfg macaudio_j714_cfg = {
 };
 
 /*
- * J716 (T6050, MacBook Pro 16" M5 Pro): the J714's card. Until a
- * speakersafetyd profile is measured on this chassis the speakers stay 30 dB
- * under the amps' 0 dB, with or without the daemon holding the volume.
+ * J716 (T6050, MacBook Pro 16" M5 Pro): the J714's card. No speakersafetyd
+ * profile is measured on this chassis, so under "Speaker Volume Unlock" the
+ * speakers stay 30 dB under the amps' 0 dB, with or without the daemon
+ * holding the volume, and so does the lease while it is not granted. A
+ * granted lease runs them at 0 dB, as on the J714: the owner (speakerguardd
+ * v2) protects them in its signal path with this Mac's own macOS tuning,
+ * from their V/I sense, and refuses any other operating volume.
  */
 struct macaudio_platform_cfg macaudio_j716_cfg = {
 	.enable_speakers = true,
@@ -4157,6 +4278,7 @@ struct macaudio_platform_cfg macaudio_j716_cfg = {
 	.stereo = true,
 	.safe_vol = -30,
 	.max_vol = -30,
+	.grant_lifts_ceiling = true,
 	.fe_dai_names = { "j873-pcm-0", "j873-pcm-1", "j873-pcm-2" },
 	.dai_fmt = SND_SOC_DAIFMT_DSP_A | SND_SOC_DAIFMT_CBC_CFC | SND_SOC_DAIFMT_IB_NF,
 	.spk_dai_fmt = SND_SOC_DAIFMT_I2S | SND_SOC_DAIFMT_CBC_CFC |

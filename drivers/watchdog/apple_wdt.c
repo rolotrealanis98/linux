@@ -9,12 +9,15 @@
 #include <linux/clk.h>
 #include <linux/crash_dump.h>
 #include <linux/delay.h>
+#include <linux/interrupt.h>
 #include <linux/io.h>
 #include <linux/kernel.h>
 #include <linux/limits.h>
 #include <linux/module.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
+#include <linux/pm_wakeup.h>
+#include <linux/suspend.h>
 #include <linux/watchdog.h>
 
 /*
@@ -54,10 +57,41 @@
 
 #define APPLE_WDT_TIMEOUT_DEFAULT	30
 
+/*
+ * Suspend-to-idle wake timer
+ *
+ * A suspend to idle is left only for a wakeup event. Where the RTC alarm has
+ * no interrupt (T6050: the PMU's alarm is behind a generation 4 SPMI
+ * controller, whose interrupts are not supported), nothing but a person can
+ * end one. WD0's bark interrupt is a timer that can: with s2idle_wake_s set,
+ * the suspend arms WD0 to interrupt (never to reset) that many seconds later,
+ * and the interrupt is a wakeup event. Without RESET_EN, WD0 does nothing
+ * else.
+ *
+ * As a last resort, s2idle_fallback_s seconds after that wake was due, WD1
+ * resets the machine: a wake that does not come cannot leave it asleep. The
+ * watchdog is otherwise stopped across a suspend, as before. Both are undone
+ * by the resume. WD0 and WD1 count the 24 MHz reference, so the sum is at
+ * most about 178 s.
+ */
+static unsigned int s2idle_wake_s;
+module_param(s2idle_wake_s, uint, 0644);
+MODULE_PARM_DESC(s2idle_wake_s, "Wake from suspend-to-idle after this many seconds (0: off)");
+
+static unsigned int s2idle_fallback_s = 60;
+module_param(s2idle_fallback_s, uint, 0644);
+MODULE_PARM_DESC(s2idle_fallback_s,
+		 "With s2idle_wake_s, reset this many seconds after a wake that did not come (0: off)");
+
 struct apple_wdt {
 	struct watchdog_device wdd;
 	void __iomem *regs;
 	unsigned long clk_rate;
+	/* WD0's bark interrupt, or <= 0 without one */
+	int irq;
+	bool wake_armed;
+	bool fallback_armed;
+	bool barked;
 };
 
 static struct apple_wdt *to_apple_wdt(struct watchdog_device *wdd)
@@ -155,6 +189,22 @@ static const struct watchdog_info apple_wdt_info = {
 	.options = WDIOF_MAGICCLOSE | WDIOF_KEEPALIVEPING | WDIOF_SETTIMEOUT,
 };
 
+/* WD0's bark: the suspend-to-idle wake timer has run out. */
+static irqreturn_t apple_wdt_bark(int irq, void *data)
+{
+	struct device *dev = data;
+	struct apple_wdt *wdt = dev_get_drvdata(dev);
+	u32 ctrl = readl_relaxed(wdt->regs + APPLE_WDT_WD0_CTRL);
+
+	if (!(ctrl & APPLE_WDT_CTRL_IRQ_STATUS))
+		return IRQ_NONE;
+	/* Acknowledge and disarm: one wake per suspend. */
+	writel_relaxed(APPLE_WDT_CTRL_IRQ_STATUS, wdt->regs + APPLE_WDT_WD0_CTRL);
+	wdt->barked = true;
+	pm_wakeup_dev_event(dev, 0, true);
+	return IRQ_HANDLED;
+}
+
 static int apple_wdt_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -208,6 +258,25 @@ static int apple_wdt_probe(struct platform_device *pdev)
 	watchdog_stop_on_unregister(&wdt->wdd);
 	watchdog_set_restart_priority(&wdt->wdd, 128);
 
+	/*
+	 * The suspend-to-idle wake timer. Its interrupt is enabled only while
+	 * the timer is armed, and is left enabled through the suspend so that
+	 * its handler reports the wakeup from the idle loop.
+	 */
+	wdt->irq = platform_get_irq_optional(pdev, 0);
+	if (wdt->irq > 0) {
+		int ret = devm_request_irq(dev, wdt->irq, apple_wdt_bark,
+					   IRQF_NO_AUTOEN | IRQF_NO_SUSPEND,
+					   "apple-wdt-s2idle-wake", dev);
+
+		if (!ret)
+			ret = devm_device_init_wakeup(dev);
+		if (ret) {
+			dev_warn(dev, "no suspend-to-idle wake timer: %d\n", ret);
+			wdt->irq = 0;
+		}
+	}
+
 	return devm_watchdog_register_device(dev, &wdt->wdd);
 }
 
@@ -215,10 +284,52 @@ static int apple_wdt_resume(struct device *dev)
 {
 	struct apple_wdt *wdt = dev_get_drvdata(dev);
 
+	if (wdt->wake_armed) {
+		disable_irq(wdt->irq);
+		writel_relaxed(APPLE_WDT_CTRL_IRQ_STATUS, wdt->regs + APPLE_WDT_WD0_CTRL);
+		wdt->wake_armed = false;
+		dev_info(dev, "s2idle: %s\n", wdt->barked ? "woken by the wake timer" :
+			 "woken before the wake timer");
+	}
+	if (wdt->fallback_armed) {
+		wdt->fallback_armed = false;
+		/* Back to the watchdog's own timeout, stopped unless it runs. */
+		apple_wdt_stop(&wdt->wdd);
+		apple_wdt_set_timeout(&wdt->wdd, wdt->wdd.timeout);
+	}
+
 	if (watchdog_active(&wdt->wdd) || watchdog_hw_running(&wdt->wdd))
 		apple_wdt_start(&wdt->wdd);
 
 	return 0;
+}
+
+/* Arms the wake timer and its fallback, see "Suspend-to-idle wake timer". */
+static void apple_wdt_arm_s2idle_wake(struct device *dev, struct apple_wdt *wdt)
+{
+	unsigned int max_s = wdt->wdd.max_hw_heartbeat_ms / 1000;
+	unsigned int wake = min(READ_ONCE(s2idle_wake_s), max_s);
+	unsigned int fallback = READ_ONCE(s2idle_fallback_s);
+
+	writel_relaxed(APPLE_WDT_CTRL_IRQ_STATUS, wdt->regs + APPLE_WDT_WD0_CTRL);
+	writel_relaxed(0, wdt->regs + APPLE_WDT_WD0_CUR_TIME);
+	writel_relaxed(wdt->clk_rate * wake, wdt->regs + APPLE_WDT_WD0_BARK_TIME);
+	wdt->barked = false;
+	wdt->wake_armed = true;
+	enable_irq(wdt->irq);
+	writel_relaxed(APPLE_WDT_CTRL_IRQ_EN, wdt->regs + APPLE_WDT_WD0_CTRL);
+
+	if (fallback) {
+		fallback = min(wake + fallback, max_s);
+		writel_relaxed(0, wdt->regs + APPLE_WDT_WD1_CTRL);
+		writel_relaxed(0, wdt->regs + APPLE_WDT_WD1_CUR_TIME);
+		writel_relaxed(wdt->clk_rate * fallback, wdt->regs + APPLE_WDT_WD1_BITE_TIME);
+		writel_relaxed(APPLE_WDT_CTRL_RESET_EN, wdt->regs + APPLE_WDT_WD1_CTRL);
+		wdt->fallback_armed = true;
+		dev_info(dev, "s2idle: wake timer %u s, reset at %u s if no wake\n", wake, fallback);
+	} else {
+		dev_info(dev, "s2idle: wake timer %u s, no fallback\n", wake);
+	}
 }
 
 static int apple_wdt_suspend(struct device *dev)
@@ -227,6 +338,10 @@ static int apple_wdt_suspend(struct device *dev)
 
 	if (watchdog_active(&wdt->wdd) || watchdog_hw_running(&wdt->wdd))
 		apple_wdt_stop(&wdt->wdd);
+
+	if (wdt->irq > 0 && READ_ONCE(s2idle_wake_s) &&
+	    pm_suspend_target_state == PM_SUSPEND_TO_IDLE)
+		apple_wdt_arm_s2idle_wake(dev, wdt);
 
 	return 0;
 }

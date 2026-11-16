@@ -585,6 +585,40 @@ static const struct avd_variant avd_t8142_variant = {
 	.quirks = AVD_QUIRK_HEVC_V5_HEADER | AVD_QUIRK_H264_MV_128,
 };
 
+/*
+ * M5 Pro/Max (T6050): the T8142 decoder (same code window 0x14000, so the same queue-mode SRAM aperture
+ * 0x01094000 as avd-fw's v5 tier 2, and avd-version 4 in the ADT), but never reset its power domain from
+ * the recovery path: that reset froze the whole machine on the J616C (T6041), and the T6050's response to it is
+ * not known. A hung decoder on T6050 is left parked until the driver is rebound instead.
+ */
+static const struct avd_variant avd_t6050_variant = {
+	.vp_slots = {
+		[AVD_CODEC_HEVC] = 2,
+		[AVD_CODEC_H264] = 1,
+		[AVD_CODEC_VP9] = 1,
+		[AVD_CODEC_AV1] = 1,
+	},
+	.vp_slot_base = {
+		[AVD_CODEC_HEVC] = 0,
+		[AVD_CODEC_H264] = 4,
+		[AVD_CODEC_VP9] = 8,
+		[AVD_CODEC_AV1] = 9,
+	},
+	.fifo_slots = 7,
+	.configure_stream = t8122_configure_stream,
+	.capabilities = AVD_CAPABILITY_HEVC |
+			AVD_CAPABILITY_H264 |
+			AVD_CAPABILITY_VP9 |
+			AVD_CAPABILITY_AV1,
+	.fw_name = "apple/avd-fw-v5-t2.bin",
+	.revision = 4,
+	.vp_slot_offset = 0xc,
+	.submit_offset = 0x40,
+	.submit_queue_max_offset = 0x44,
+	.submit_queue_status_offset = 0x7c,
+	.quirks = AVD_QUIRK_HEVC_V5_HEADER | AVD_QUIRK_H264_MV_128 | AVD_QUIRK_NO_RECOVERY_RESET,
+};
+
 /* can also be derived from a version register */
 static const struct of_device_id avd_of_match[] = {
 	{
@@ -622,6 +656,10 @@ static const struct of_device_id avd_of_match[] = {
 	{
 		.compatible = "apple,t8140-avd",
 		.data = &avd_t8140_variant
+	},
+	{
+		.compatible = "apple,t6050-avd",
+		.data = &avd_t6050_variant
 	},
 	{
 		.compatible = "apple,t8142-avd",

@@ -905,11 +905,12 @@ static void iomfb_v27_sleep_start(struct apple_dcp *dcp,
 	dcp_push(dcp, rpc->oob, &rpc->method, rpc->input, rpc->output,
 		 rpc->data, iomfb_v27_sleep_done, rpc);
 	dcp->push_out_prefill = NULL;
-	if ((rpc->a442 || rpc->a442_key) && !rpc->oob) {
-		static const struct dcp_method_entry a442 = {
-			.name = "v27_a442", .tag = { 'A', '4', '4', '2' },
-		};
+	if ((rpc->a442 || rpc->a442_key) && !rpc->oob && dcp->v27_sleep_tags) {
+		/* dcp_push() copies the entry. */
+		struct dcp_method_entry a442 = { .name = "v27_a442" };
 		u8 in[92];
+
+		memcpy(a442.tag, dcp->v27_sleep_tags->tag[V27_SLEEP_A442], sizeof(a442.tag));
 
 		memset(in, 0xaa, sizeof(in));
 		memset(in, 0, 16);
@@ -1000,7 +1001,7 @@ static int iomfb_v27_rpc(struct apple_dcp *dcp, bool a500, bool on, bool flags)
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) ||
-	    dcp->fw_compat != DCP_FIRMWARE_V_27_0 ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_27_0 || !dcp->v27_sleep_tags ||
 	    dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G ||
 	    (a500 || flags ? iomfb_v27_sleep_args(dcp, a500, args) :
 			     iomfb_v27_display_args(dcp, false, args)))
@@ -1016,7 +1017,9 @@ static int iomfb_v27_rpc(struct apple_dcp *dcp, bool a500, bool on, bool flags)
 	rpc->method = (struct dcp_method_entry) {
 		.name = a500 ? "v27_sleep_500" : "v27_sleep_power",
 	};
-	memcpy(rpc->method.tag, a500 ? "A500" : "A484", 4);
+	/* This build's tags (iomfb_v27_sleep_tags()): A500 and A484 on 27.0, A550 and A535 on 27.3. */
+	memcpy(rpc->method.tag,
+	       dcp->v27_sleep_tags->tag[a500 ? V27_SLEEP_AP_LINK : V27_SLEEP_SET_POWER_STATE], 4);
 	/*
 	 * Off, before each DCP's and DCPEXT's sleep idle: A484 with the sleep's flags, then
 	 * A500's sleep form. On, after the wake: A500's wake form, then A484 with the flags.
@@ -1054,14 +1057,14 @@ static int iomfb_v27_rpc(struct apple_dcp *dcp, bool a500, bool on, bool flags)
 	return ret;
 }
 
-static int iomfb_v27_call(struct apple_dcp *dcp, const char *tag, const void *in,
-			  u32 in_len, u32 out_len, bool inout, u8 a442_key);
+static int iomfb_v27_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			  const void *in, u32 in_len, u32 out_len, bool inout, u8 a442_key);
 
-/* One call of the display stage around a V27 sleep, by tag; any reply is accepted. */
-int iomfb_v27_sleep_call(struct apple_dcp *dcp, const char *tag, const void *in,
-			 u32 in_len, u32 out_len)
+/* One call of the display stage around a V27 sleep, by role; any reply is accepted. */
+int iomfb_v27_sleep_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			 const void *in, u32 in_len, u32 out_len)
 {
-	return iomfb_v27_call(dcp, tag, in, in_len, out_len, false, 0);
+	return iomfb_v27_call(dcp, call, in, in_len, out_len, false, 0);
 }
 
 /*
@@ -1069,9 +1072,10 @@ int iomfb_v27_sleep_call(struct apple_dcp *dcp, const char *tag, const void *in,
  * it, before the call's answer: an external processor's wake sends A489 so.
  * A442's own answer is not waited for.
  */
-int iomfb_v27_sleep_call_a442(struct apple_dcp *dcp, const char *tag, u32 out_len, u8 key)
+int iomfb_v27_sleep_call_a442(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			      u32 out_len, u8 key)
 {
-	return iomfb_v27_call(dcp, tag, NULL, 0, out_len, false, key);
+	return iomfb_v27_call(dcp, call, NULL, 0, out_len, false, key);
 }
 
 /*
@@ -1082,17 +1086,18 @@ int iomfb_v27_sleep_a115(struct apple_dcp *dcp, bool awake)
 {
 	u32 v = awake;
 
-	return iomfb_v27_call(dcp, "A115", &v, 0, sizeof(v), true, 0);
+	return iomfb_v27_call(dcp, V27_SLEEP_A115, &v, 0, sizeof(v), true, 0);
 }
 
-static int iomfb_v27_call(struct apple_dcp *dcp, const char *tag, const void *in,
-			  u32 in_len, u32 out_len, bool inout, u8 a442_key)
+static int iomfb_v27_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			  const void *in, u32 in_len, u32 out_len, bool inout, u8 a442_key)
 {
 	struct iomfb_v27_sleep_rpc *rpc;
 	int ret;
 
 	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) ||
-	    dcp->fw_compat != DCP_FIRMWARE_V_27_0 || in_len > sizeof(rpc->data) ||
+	    dcp->fw_compat != DCP_FIRMWARE_V_27_0 || !dcp->v27_sleep_tags ||
+	    call >= V27_SLEEP_NUM_CALLS || in_len > sizeof(rpc->data) ||
 	    (inout && out_len > sizeof(rpc->data)))
 		return -EOPNOTSUPP;
 	rpc = kzalloc_obj(*rpc);
@@ -1105,7 +1110,7 @@ static int iomfb_v27_call(struct apple_dcp *dcp, const char *tag, const void *in
 	rpc->transaction.start = iomfb_v27_sleep_start;
 	rpc->transaction.release = iomfb_v27_sleep_release;
 	rpc->method = (struct dcp_method_entry) { .name = "v27_display_stage" };
-	memcpy(rpc->method.tag, tag, 4);
+	memcpy(rpc->method.tag, dcp->v27_sleep_tags->tag[call], 4);
 	rpc->input = in_len;
 	rpc->output = out_len;
 	rpc->inout = inout;

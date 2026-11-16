@@ -228,6 +228,34 @@ const struct dcp_method_entry *iomfb_v27_methods_j714s(struct device *dev,
 const char *iomfb_v27_missing_method(const struct dcp_method_entry *methods,
 				     unsigned int *count);
 
+/*
+ * The firmware 27 display sleep's calls, by role. Their tags move between builds (27.2
+ * renumbered the AP methods), and the AP link's release is in no method table: the dispatch
+ * compares its tag in code. Each build the sleep is known on has its own table
+ * (iomfb_v27_sleep_tags()); the sleep sends nothing on any other.
+ */
+enum iomfb_v27_sleep_call {
+	V27_SLEEP_SET_POWER_STATE,	/* in 0x10, out 0x8: plain and flags forms */
+	V27_SLEEP_AP_LINK,		/* in 4: the AP link's release (sleep form) or wake form */
+	V27_SLEEP_PIPE_CFG_414,		/* in 8, out 8 */
+	V27_SLEEP_PIPE_QUERY_478,	/* out 4 */
+	V27_SLEEP_PIPE_SET_476,		/* in 4 */
+	V27_SLEEP_IS_MAIN_DISPLAY,	/* out 4 */
+	V27_SLEEP_A115,			/* UnifiedPipeline in/out word */
+	V27_SLEEP_A442,			/* out of band: in 0x5c, out 0x1004 */
+	V27_SLEEP_NUM_CALLS
+};
+
+#define IOMFB_V27_SLEEP_TAG(call, tag) [call] = { tag[0], tag[1], tag[2], tag[3] }
+
+struct iomfb_v27_sleep_tags {
+	const char *build;
+	char tag[V27_SLEEP_NUM_CALLS][4];
+};
+
+struct device;
+const struct iomfb_v27_sleep_tags *iomfb_v27_sleep_tags(struct device *dev, const char *compat);
+
 #define IOMFB_MAX_CB (1000)
 
 bool iomfb_validate_callback_h17p(int tag, u32 in_len, u32 out_len);
@@ -237,10 +265,11 @@ int iomfb_v27_sleep_rpc(struct apple_dcp *dcp, bool a500, bool on);
 bool iomfb_v27_sleep_described(struct apple_dcp *dcp);
 void iomfb_v27_wake_present(struct apple_dcp *dcp);
 int iomfb_v27_sleep_plain(struct apple_dcp *dcp, bool on);
-int iomfb_v27_sleep_call(struct apple_dcp *dcp, const char *tag, const void *in,
-			 u32 in_len, u32 out_len);
+int iomfb_v27_sleep_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			 const void *in, u32 in_len, u32 out_len);
 int iomfb_v27_sleep_a115(struct apple_dcp *dcp, bool awake);
-int iomfb_v27_sleep_call_a442(struct apple_dcp *dcp, const char *tag, u32 out_len, u8 key);
+int iomfb_v27_sleep_call_a442(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
+			      u32 out_len, u8 key);
 /* The display stage's DT arguments: A414's eight, then A487's four. */
 #define IOMFB_V27_STAGE_ARGS	12
 int iomfb_v27_display_args(struct apple_dcp *dcp, bool stage, u8 *args);

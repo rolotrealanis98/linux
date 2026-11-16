@@ -849,6 +849,10 @@ static int cd321x_typec_update_mode(struct tps6598x *tps,
 		    cd321x->state.mode == TYPEC_TBT_MODE)
 			return 0;
 
+		dev_info(tps->dev, "TBT connection: data_status 0x%llx, cable speed %u gen %u\n",
+			 (unsigned long long)st->data_status,
+			 TPS_DATA_STATUS_TBT_CABLE_SPEED(st->data_status),
+			 TPS_DATA_STATUS_TBT_CABLE_GEN(st->data_status));
 		tbt_data.cable_mode = TBT_MODE |
 			TBT_SET_CABLE_SPEED(TPS_DATA_STATUS_TBT_CABLE_SPEED(st->data_status)) |
 			TBT_SET_CABLE_ROUNDED(TPS_DATA_STATUS_TBT_CABLE_GEN(st->data_status));

@@ -2983,11 +2983,81 @@ static void t6050_mcc_release(struct apple_sleep *s, unsigned int i)
  */
 static const u8 t6050_mcc_lanes[5] = { 0xf, 0xf, 0xf, 0xf, 0x5 };
 
+/*
+ * K116s (64 GB), experimental and unverified: the same stop on every enabled channel page. The
+ * ADT's mcc node has 32 of them from reg[22] (8 AMCCs of 4), at 0x2220200000 + amcc * 0x2000000
+ * + channel * 0x200000; this board enables AMCCs 0-3, channels 0-15. All 16 read alike at run
+ * time, so each gets what reg[22..25] get: the +0x584 bits, then all four lanes. This is what
+ * every K116s sleep so far ran with; macOS's register state at its commit suggests it only works
+ * on reg[22..26], as the profile does. k116s_mcc_pages = 0 selects the profile's stop.
+ * Mapped at boot: the commit cannot.
+ */
+static void __iomem *t6050_k116s_mcc[16];
+static unsigned int k116s_mcc_pages = 16;
+module_param(k116s_mcc_pages, uint, 0644);
+
+static int __init t6050_k116s_mcc_map(void)
+{
+	unsigned int i;
+
+	if (!of_machine_is_compatible("apple,k116s"))
+		return 0;
+	for (i = 0; i < ARRAY_SIZE(t6050_k116s_mcc); i++)
+		t6050_k116s_mcc[i] = ioremap(0x2220200000ULL + (i / 4) * 0x2000000ULL +
+					     (i % 4) * 0x200000ULL, 0x8000);
+	return 0;
+}
+late_initcall(t6050_k116s_mcc_map);
+
+static bool t6050_mcc_stop_k116s(void)
+{
+	unsigned int ch, pass, n, k;
+	unsigned int pages = min_t(unsigned int, k116s_mcc_pages, ARRAY_SIZE(t6050_k116s_mcc));
+	u32 v;
+
+	if (!pages || !t6050_k116s_mcc[0])
+		return false;
+	for (ch = 0; ch < pages; ch++) {
+		void __iomem *m = t6050_k116s_mcc[ch];
+
+		if (!m)
+			continue;
+		for (k = 0; k < 32; k++) {
+			readq(m + 0x4000 + 8 * k);
+			v = readl(m + 0x584);
+			if (!v)
+				break;
+			v &= v - 1;
+			writel(v, m + 0x584);
+			if (!v)
+				break;
+		}
+	}
+	for (pass = 0; pass < 2; pass++)
+		for (ch = 0; ch < pages; ch++) {
+			void __iomem *m = t6050_k116s_mcc[ch];
+			u32 mask = pass ? 0x590 : 0x58c;
+
+			if (!m)
+				continue;
+			for (n = 2 * pass; n < 2 * pass + 2; n++) {
+				readq(m + 0x4050 + 8 * n);
+				writel(readl(m + mask), m + mask);
+				writel(readl(m + 0x588) | BIT(16 + 4 * n), m + 0x588);
+				writel(readl(m + 0x588) & ~BIT(4 * n), m + 0x588);
+			}
+		}
+	return true;
+}
+
 static void t6050_mcc_stop(struct apple_sleep *s)
 {
 	struct apple_sleep_region_state *r = s->region;
 	unsigned int ch, pass, n, k;
 	u32 v;
+
+	if (t6050_mcc_stop_k116s())
+		return;
 
 	for (ch = 0; ch < 4; ch++) {
 		void __iomem *m = r->mcc[ch];

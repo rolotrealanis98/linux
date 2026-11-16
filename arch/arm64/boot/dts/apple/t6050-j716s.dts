@@ -274,7 +274,8 @@
 
 /*
  * Type-C, from the ADT:
- *   ATC0 usb-drd0 left-back  hpm0 nub-spmi-a0 0x0c (the debug port, not described)
+ *   ATC0 usb-drd0 left-back  hpm0 nub-spmi-a0 0x0c (the tether; a host port in
+ *                                                   t6050-j716s-atc0-host.dts)
  *   ATC1 usb-drd1 left-front hpm1 nub-spmi-a0 0x0a
  *   ATC2 usb-drd2 right      hpm2 nub-spmi-a1 0x0c
  *   MagSafe                  hpm5 nub-spmi-a0 0x08 (not a USB-C connector)
@@ -1092,6 +1093,10 @@
 	status = "okay";
 };
 
+#ifdef T6050_J716S_ATC0_HOST
+/* ATC0 as a host port (t6050-j716s-atc0-host.dts) instead of the tether below */
+#include "t6050-j716s-atc0-host.dtsi"
+#else
 /*
  * ATC0 (left-back, the MagSafe side; ADT usb-drd0, hpm0 "left-back") carries the
  * USB tether: a device-mode controller on the PHY state the boot loader's USB
@@ -1122,3 +1127,4 @@
 	snps,dis_enblslpm_quirk;
 	status = "okay";
 };
+#endif /* T6050_J716S_ATC0_HOST */

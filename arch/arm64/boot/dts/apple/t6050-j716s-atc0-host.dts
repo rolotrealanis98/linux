@@ -1,0 +1,11 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * MacBook Pro (16-inch, M5 Pro, 2026) with all three USB-C ports as host ports: the
+ * left-back port (ATC0) gets USB 2/3 and its USB4/Thunderbolt router instead of the USB
+ * gadget tether t6050-j716s.dts keeps there (t6050-j716s-atc0-host.dtsi).
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+#define T6050_J716S_ATC0_HOST
+#include "t6050-j716s.dts"

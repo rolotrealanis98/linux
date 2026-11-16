@@ -29,6 +29,7 @@
 #include <clocksource/arm_arch_timer.h>
 #include <asm/arch_timer.h>
 #include <linux/unaligned.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #define SMC_ENDPOINT			0x20
 
@@ -648,7 +649,7 @@ static int apple_smc_probe(struct platform_device *pdev)
 	mutex_init(&smc->mutex);
 	spin_lock_init(&smc->lock);
 	smc->dev = &pdev->dev;
-	smc->saved_enabled = of_machine_is_compatible("apple,j714s") &&
+	smc->saved_enabled = apple_t6050_sleep_board() &&
 		of_device_is_compatible(dev->of_node, "apple,t6050-smc");
 	if (smc->saved_enabled)
 		smc->wake_reasons = apple_smc_j714s_wake_reasons;

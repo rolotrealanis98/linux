@@ -12,6 +12,7 @@
 #include <linux/spmi.h>
 #include <linux/suspend.h>
 #include <linux/usb/role.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "tps6598x.h"
 
@@ -729,7 +730,7 @@ static bool sn201202x_sleep_event(struct tps6598x *tps)
  */
 static bool sn201202x_j714s(void)
 {
-	return of_machine_is_compatible("apple,j714s");
+	return apple_t6050_sleep_board();
 }
 
 static int sn201202x_sleep_only_probe(struct sn201202x *sn)

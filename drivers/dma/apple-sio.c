@@ -25,6 +25,7 @@
 #include <linux/soc/apple/sleep.h>
 #include <linux/suspend.h>
 #include <linux/wait.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "dmaengine.h"
 #include "virt-dma.h"
@@ -702,7 +703,7 @@ static const struct sio_hw_data sio_hw_t6050 = {
  */
 static bool sio_t6050_board(void)
 {
-	return of_machine_is_compatible("apple,j714s");
+	return apple_t6050_sleep_board();
 }
 
 static const struct of_device_id sio_of_match[] = {

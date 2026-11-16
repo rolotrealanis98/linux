@@ -27,6 +27,7 @@
 #include <linux/usb/role.h>
 #include <linux/workqueue.h>
 #include <linux/firmware.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 #include <drm/drm_connector.h>
 
 #include "cd321x-dp.h"
@@ -358,7 +359,7 @@ static int tps6598x_disconnect(struct tps6598x *tps, u32 status)
  */
 static bool tipd_sleep_ssps_rules(void)
 {
-	return of_machine_is_compatible("apple,j714s");
+	return apple_t6050_sleep_board();
 }
 
 /*

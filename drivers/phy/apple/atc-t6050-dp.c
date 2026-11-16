@@ -27,6 +27,7 @@
 #include <linux/usb/typec_dp.h>
 #include <linux/usb/typec_altmode.h>
 #include <linux/usb/typec_tbt.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 enum atc_operation { ATC_MASK, ATC_TUNABLE, ATC_DELAY, ATC_POLL, ATC_POWER, ATC_FIRMWARE };
 struct atc_op {

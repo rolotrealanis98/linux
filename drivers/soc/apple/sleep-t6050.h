@@ -3385,7 +3385,7 @@ static const struct apple_sleep_soc t6050_sleep_soc = {
 	.smc_policy = &t6050_smc_policy,
 	.early_context = true,
 	.own_wake = true,
-	.machine = "apple,j714s",
+	.machines = apple_t6050_sleep_boards,
 	/* The interrupt mask every SPMI bus has through the sleep, as on T8140 and T8132 */
 	.spmi_notify_sleep = 0x2000001,
 	.boot_mpidr = 0x040000,

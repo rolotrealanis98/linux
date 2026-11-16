@@ -49,6 +49,7 @@
 #include "nvme.h"
 #include "apple-m5-policy.h"
 #include <linux/soc/apple/sleep-ans.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #define APPLE_ANS_BOOT_TIMEOUT	  USEC_PER_SEC
 #define APPLE_ANS_SLEEP_SHN_TIMEOUT USEC_PER_SEC

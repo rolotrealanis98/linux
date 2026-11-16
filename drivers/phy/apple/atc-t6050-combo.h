@@ -123,7 +123,7 @@ static void combo_pipe_fault(struct t6050_dp *dp, const char *what, int ret)
  */
 static bool combo_sleep_board(void)
 {
-	return of_machine_is_compatible("apple,j714s");
+	return apple_t6050_sleep_board();
 }
 
 static bool combo_domains_held(struct t6050_dp *dp)

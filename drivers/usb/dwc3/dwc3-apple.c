@@ -30,6 +30,7 @@
 #include <linux/usb/hcd.h>
 #include <linux/usb/phy.h>
 #include <linux/workqueue.h>
+#include <linux/soc/apple/t6050-sleep-board.h>
 
 #include "dwc3-apple-state.h"
 #include "glue.h"
@@ -1016,7 +1017,7 @@ static void dwc3_apple_check_hub_later(struct dwc3_apple *appledwc)
  */
 static bool dwc3_apple_sleep_board(void)
 {
-	return of_machine_is_compatible("apple,j714s");
+	return apple_t6050_sleep_board();
 }
 
 /*

@@ -459,6 +459,7 @@ static const struct hw_info t6050_pciec_hw = {
 	.no_port_reset		= true,
 	.msimap_by_vector	= true,
 	.mps_timers		= true,
+	.s2idle_hold_domain	= true,
 };
 
 static const struct of_device_id apple_pcie_of_match[];

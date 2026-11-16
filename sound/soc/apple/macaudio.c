@@ -1181,15 +1181,21 @@ static bool macaudio_spk_ramps(const struct macaudio_snd_data *ma)
 static void macaudio_spk_ramp_down(struct macaudio_snd_data *ma, ktime_t deadline)
 {
 	ktime_t next = ktime_get();
+	int op_db = ma->cfg->spk_fixed_ceiling ? ma->cfg->safe_vol :
+						 macaudio_max_vol(ma);
 	unsigned int i;
 	s64 wait;
 
 	lockdep_assert_held(&ma->spk_mutex);
 
 	for (i = 0; i < ARRAY_SIZE(macaudio_spk_ramp_db); i++) {
-		/* A fixed ceiling is the operating gain: start below it */
-		if (ma->cfg->spk_fixed_ceiling &&
-		    macaudio_spk_ramp_db[i] >= ma->cfg->safe_vol)
+		/*
+		 * The operating gain is the machine's ceiling: start below it. The
+		 * steps are absolute, so a machine whose ceiling is under the first
+		 * step (the J716's -30 dB) must not ramp up to -2 dB under a playing
+		 * stream when its owner lets go.
+		 */
+		if (macaudio_spk_ramp_db[i] >= op_db)
 			continue;
 		if (!ktime_before(ktime_get(), deadline))
 			return;

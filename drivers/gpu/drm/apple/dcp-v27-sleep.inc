@@ -71,23 +71,24 @@ static int dcp_v27_rtkit_cycle(struct apple_dcp *dcp, unsigned int pause_ms);
 
 /*
  * The calls made before A484's plain form in either direction, at the wake and at the display's
- * sleep: A414, A489, A489, A487, A489, A412. At the wake each is followed by A500's wake form, at
- * the display's sleep none is. Their arguments come from the DT; their replies are not needed.
+ * sleep: A414, A489, A489, A487, A489, A412 (27.0's tags; this build's are in
+ * dcp->v27_sleep_tags). At the wake each is followed by A500's wake form, at the display's sleep
+ * none is. Their arguments come from the DT; their replies are not needed.
  */
 static void dcp_v27_display_stage(struct apple_dcp *dcp, bool a500, bool rounds, bool cycle)
 {
 	u8 args[IOMFB_V27_STAGE_ARGS];
 	const struct {
-		char tag[4] __nonstring;
+		enum iomfb_v27_sleep_call call;
 		u8 in, out;
 		const u8 *data;
 	} seq[] = {
-		{ "A414", 8, 8, args },
-		{ "A489", 0, 4, NULL },
-		{ "A489", 0, 4, NULL },
-		{ "A487", 4, 0, args + 8 },
-		{ "A489", 0, 4, NULL },
-		{ "A412", 0, 4, NULL },
+		{ V27_SLEEP_PIPE_CFG_414, 8, 8, args },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, NULL },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, NULL },
+		{ V27_SLEEP_PIPE_SET_476, 4, 0, args + 8 },
+		{ V27_SLEEP_PIPE_QUERY_478, 0, 4, NULL },
+		{ V27_SLEEP_IS_MAIN_DISPLAY, 0, 4, NULL },
 	};
 	unsigned int i;
 	int ret;
@@ -98,9 +99,10 @@ static void dcp_v27_display_stage(struct apple_dcp *dcp, bool a500, bool rounds,
 		/* macOS's wake: every endpoint's session open around each call, closed after its A500 */
 		if (rounds && !cycle)
 			dcp_v27_sessions(dcp, true);
-		ret = iomfb_v27_sleep_call(dcp, seq[i].tag, seq[i].data, seq[i].in, seq[i].out);
+		ret = iomfb_v27_sleep_call(dcp, seq[i].call, seq[i].data, seq[i].in, seq[i].out);
 		if (ret)
-			dev_warn(dcp->dev, "V27 display stage: %.4s: %d\n", seq[i].tag, ret);
+			dev_warn(dcp->dev, "V27 display stage: %.4s: %d\n",
+				 dcp->v27_sleep_tags->tag[seq[i].call], ret);
 		if (a500)
 			iomfb_v27_sleep_rpc(dcp, true, true);
 		/* And its own DCP stop/restart after each call; the next call runs in a fresh session */
@@ -435,6 +437,21 @@ static unsigned int dcp_v27_ext_nr(struct apple_dcp *dcp)
 	return dcp->index ? dcp->index - 1 : 0;
 }
 
+/* A call's tag on this build, NUL-terminated, to name its step. */
+struct dcp_v27_tag_name {
+	char s[5];
+};
+
+static struct dcp_v27_tag_name dcp_v27_tag_name(struct apple_dcp *dcp,
+						enum iomfb_v27_sleep_call call)
+{
+	struct dcp_v27_tag_name n = {};
+
+	if (dcp->v27_sleep_tags)
+		memcpy(n.s, dcp->v27_sleep_tags->tag[call], 4);
+	return n;
+}
+
 /* Notes a call of the sleep step, "name result@ms", and passes its result on. */
 static int dcp_v27_step(struct dcp_v27_sleep *s, const char *what, int ret)
 {
@@ -641,9 +658,10 @@ static int dcp_v27_ext_wake_calls(struct dcp_v27_sleep *s)
 	round[0] = dcp_v27_ext_round(dcp);
 	/* A489 before and A115 after the flagged power call, as on every external processor. */
 	if (a442)
-		a489 = iomfb_v27_sleep_call_a442(dcp, "A489", 4, V27_EXT_A442_KEY);
+		a489 = iomfb_v27_sleep_call_a442(dcp, V27_SLEEP_PIPE_QUERY_478, 4,
+						 V27_EXT_A442_KEY);
 	else if (v27_a115)
-		a489 = iomfb_v27_sleep_call(dcp, "A489", NULL, 0, 4);
+		a489 = iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4);
 	ret = iomfb_v27_sleep_rpc(dcp, false, true);
 	if (!ret && v27_a115)
 		a115 = iomfb_v27_sleep_a115(dcp, true);
@@ -1120,7 +1138,7 @@ static int dcp_v27_reopen_live(struct apple_dcp *dcp)
 			if (s->soft_off && v27_rtkit_cycles >= 1)
 				dcp_v27_rtkit_cycle(dcp, 0);
 			if (s->soft_off && v27_a115)
-				iomfb_v27_sleep_call(dcp, "A489", NULL, 0, 4);
+				iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4);
 			ret = iomfb_v27_sleep_rpc(dcp, false, true);
 			if (ret)
 				return ret;
@@ -1464,9 +1482,10 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 		iomfb_v27_sleep_rpc(dcp, true, true);
 	}
 	if (dcp_v27_two_stage(s) && v27_a115)
-		iomfb_v27_sleep_call(dcp, "A489", NULL, 0, 4);
+		iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4);
 	/* A484, actual state/status */
-	ret = dcp_v27_step(s, "A484", iomfb_v27_sleep_rpc(dcp, false, false));
+	ret = dcp_v27_step(s, dcp_v27_tag_name(dcp, V27_SLEEP_SET_POWER_STATE).s,
+			   iomfb_v27_sleep_rpc(dcp, false, false));
 	if (ret)
 		goto uncertain;
 	s->power_off = true;
@@ -1498,7 +1517,8 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 			goto undo; /* nothing stopped: the display back on, the sleep refused */
 	}
 	/* A500's sleep form right after A484, on every DCP and DCPEXT. */
-	ret = dcp_v27_step(s, "A500", iomfb_v27_sleep_rpc(dcp, true, false));
+	ret = dcp_v27_step(s, dcp_v27_tag_name(dcp, V27_SLEEP_AP_LINK).s,
+			   iomfb_v27_sleep_rpc(dcp, true, false));
 	if (ret)
 		goto uncertain;
 	for (i = ARRAY_SIZE(v27_sleep_endpoints); i-- > 0;) {

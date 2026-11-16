@@ -5130,6 +5130,34 @@ static int apple_sleep_profile_check(struct apple_sleep *s)
 	return 0;
 }
 
+/*
+ * apple_sleep.enable=0 leaves the controller unbound: no CPU power ops, no exported helper
+ * sees a driver. Writing 1 to /sys/module/apple_sleep/parameters/enable later binds it then,
+ * to tell a fault of its binding apart from the boot.
+ */
+static bool apple_sleep_enable = true;
+static struct platform_driver apple_sleep_driver;
+
+static int apple_sleep_enable_set(const char *val, const struct kernel_param *kp)
+{
+	bool was = READ_ONCE(apple_sleep_enable);
+	int ret = param_set_bool(val, kp);
+
+	if (ret || was || !READ_ONCE(apple_sleep_enable) || system_state < SYSTEM_RUNNING)
+		return ret;
+	pr_emerg("apple-sleep: enabled at runtime: binding the sleep controller\n");
+	ret = driver_attach(&apple_sleep_driver.driver);
+	pr_emerg("apple-sleep: bind returned %d, %s\n", ret, apple_sleep ? "bound" : "not bound");
+	return ret;
+}
+
+static const struct kernel_param_ops apple_sleep_enable_ops = {
+	.set = apple_sleep_enable_set,
+	.get = param_get_bool,
+};
+module_param_cb(enable, &apple_sleep_enable_ops, &apple_sleep_enable, 0644);
+MODULE_PARM_DESC(enable, "Bind the sleep controller (0: leave it unbound; writing 1 later binds it)");
+
 static int apple_sleep_probe(struct platform_device *pdev)
 {
 	struct device *dev = &pdev->dev;
@@ -5139,6 +5167,10 @@ static int apple_sleep_probe(struct platform_device *pdev)
 	/* Below EL2 a monitor owns all of this. */
 	if (!is_kernel_in_hyp_mode())
 		return -ENODEV;
+	if (!READ_ONCE(apple_sleep_enable)) {
+		dev_info(dev, "left unbound (apple_sleep.enable=0)\n");
+		return -ENODEV;
+	}
 
 	BUILD_BUG_ON(ARRAY_SIZE(t8132_quiesce_words) > 32);
 

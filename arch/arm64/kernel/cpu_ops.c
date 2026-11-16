@@ -8,6 +8,8 @@
 #include <linux/acpi.h>
 #include <linux/cache.h>
 #include <linux/errno.h>
+#include <linux/init.h>
+#include <linux/kstrtox.h>
 #include <linux/of.h>
 #include <linux/string.h>
 #include <asm/acpi.h>
@@ -102,6 +104,21 @@ static const char *__init cpu_read_enable_method(int cpu)
 /*
  * Read a cpu's enable method and record it in cpu_ops.
  */
+#ifdef CONFIG_HOTPLUG_CPU
+/*
+ * spin_table_park=0 keeps plain spin-table even where the boot object publishes
+ * /chosen/aurora,s2r-mailbox: no CPU hotplug and no system sleep through it, but the CPUs
+ * are run exactly as without the mailbox. For telling a fault of the parking ops apart.
+ */
+static bool spin_table_park __initdata = true;
+
+static int __init spin_table_park_setup(char *arg)
+{
+	return kstrtobool(arg, &spin_table_park);
+}
+early_param("spin_table_park", spin_table_park_setup);
+#endif
+
 int __init init_cpu_ops(int cpu)
 {
 	const char *enable_method = cpu_read_enable_method(cpu);
@@ -121,7 +138,7 @@ int __init init_cpu_ops(int cpu)
 	 * says so with /chosen/aurora,s2r-mailbox. Its spin-table CPUs can then
 	 * leave the kernel, through the parking spin table.
 	 */
-	if (cpu_ops[cpu] == &smp_spin_table_ops &&
+	if (cpu_ops[cpu] == &smp_spin_table_ops && spin_table_park &&
 	    of_property_present(of_chosen, "aurora,s2r-mailbox")) {
 		cpu_ops[cpu] = &smp_rvbar_spin_table_ops;
 		pr_info_once("spin-table CPUs can park: the boot object brings them back\n");

@@ -133,7 +133,7 @@ struct dcp_v27_sleep {
 	unsigned int ext_polls;
 	ktime_t ext_resumed;
 	/* The sleep step's calls, each with its result and time, for one line. */
-	char steps[224];
+	char steps[384];
 	unsigned int steps_len;
 	ktime_t steps_start;
 	int stop_error, recovery_error;
@@ -419,12 +419,55 @@ static void dcp_v27_sleep_invalidate(struct apple_dcp *dcp)
  * methods in the 27.2 and 27.3 tables (set_power_state is A534/A535 there, A500 is
  * set_parameter_dcp), and the 27.3 tags of the sleep's own calls are not known.
  */
+/*
+ * The J716s on 27.3: the same display step with its own tags (dcp->v27_sleep_tags, read from
+ * its t605xdcp), behind appledrm.j716s_deep_sleep. Its endpoints are tracked from the boot
+ * (dcp->v27_sleep_eps) only when the switch is on the command line; at runtime it can only
+ * be switched off again. None of the step's power calls had run on 27.3 before it.
+ */
+static bool j716s_deep_sleep;
+module_param(j716s_deep_sleep, bool, 0644);
+MODULE_PARM_DESC(j716s_deep_sleep, "J716s, DCP firmware 27.3: run the firmware 27 display sleep's step for a deep sleep with the 27.3 tags instead of refusing it at .prepare (on the command line: its endpoints are tracked from the boot; default 0)");
+
+static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
+{
+	return tags && READ_ONCE(j716s_deep_sleep) && of_machine_is_compatible("apple,j716s") &&
+	       of_device_is_compatible(dev->of_node, "apple,t6050-dcp");
+}
+
+/* The display step runs on this processor: the J714s on 27.0, or the J716s switched on. */
+static bool dcp_v27_sleep_runs(struct apple_dcp *dcp)
+{
+	return dcp->v27_sleep_known ||
+	       (!dcp->v27_j714s && dcp->v27_sleep_eps && READ_ONCE(j716s_deep_sleep));
+}
+
+static bool dcp_v27_j716s(struct apple_dcp *dcp)
+{
+	return !dcp->v27_j714s && dcp->v27_sleep_tags && of_machine_is_compatible("apple,j716s");
+}
+
 static int dcp_v27_sleep_known(struct apple_dcp *dcp)
 {
 	char compat[DCP_FW_VERSION_STR_LEN];
 
 	if (dcp->v27_sleep_known)
 		return 0;
+	if (dcp_v27_j716s(dcp)) {
+		if (!READ_ONCE(j716s_deep_sleep) || !dcp->v27_sleep_eps) {
+			dev_warn(dcp->dev, "deep sleep refused: the J716s's display step on firmware 27.3 is %s (appledrm.j716s_deep_sleep=1 on the command line runs it); s2idle is not affected\n",
+				 dcp->v27_sleep_eps ? "switched off" : "not set up at boot");
+			return -EOPNOTSUPP;
+		}
+		if (dcp->v27_dpms) {
+			dev_warn(dcp->dev, "deep sleep refused: the display is powered down by DPMS (appledrm.j716s_sleep, level %u); DPMS on first\n",
+				 dcp->v27_dpms);
+			return -EBUSY;
+		}
+		dev_info(dcp->dev, "deep sleep: the J716s's display step with the firmware %s tags (appledrm.j716s_deep_sleep)\n",
+			 dcp->v27_sleep_tags->build);
+		return 0;
+	}
 	dcp_read_fw_version(dcp->dev, "apple,firmware-compat", compat);
 	dev_warn(dcp->dev, "deep sleep refused: no display sleep known for firmware %s on this machine (only the J714s on 27.0); s2idle is not affected\n",
 		 compat);
@@ -815,8 +858,10 @@ static int dcp_v27_sleep_inventory(struct apple_dcp *dcp)
 	u32 supported = 0;
 	unsigned int ep, i;
 
-	if (READ_ONCE(dcp->sleep_v27_unhandled))
+	if (READ_ONCE(dcp->sleep_v27_unhandled)) {
+		dev_info(dcp->dev, "V27 sleep: a message came on an endpoint nothing handles\n");
 		return -EUCLEAN;
+	}
 	for (i = 0; i < ARRAY_SIZE(v27_sleep_endpoints); i++)
 		supported |= BIT(v27_sleep_endpoints[i] - 0x20);
 	for (ep = 0x20; ep < 0x100; ep++) {
@@ -830,8 +875,11 @@ static int dcp_v27_sleep_inventory(struct apple_dcp *dcp)
 		if (!tracked && !apple_rtkit_endpoint_started(dcp->rtk, ep) &&
 		    !apple_rtkit_has_endpoint(dcp->rtk, ep))
 			continue;
-		if (ep >= 0x40 || !(supported & BIT(ep - 0x20)))
+		if (ep >= 0x40 || !(supported & BIT(ep - 0x20))) {
+			dev_info(dcp->dev, "V27 sleep: endpoint %#x (%s) is not one the sleep handles\n",
+				 ep, tracked ? "tracked" : "started or offered");
 			return -EOPNOTSUPP;
+		}
 	}
 	return 0;
 }
@@ -1357,7 +1405,7 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 
 	dcp_v27_sleep_invalidate(dcp);
 	/* .prepare refused it already; nothing is sent to firmware this step is not known for. */
-	if (!dcp->v27_sleep_known)
+	if (!dcp_v27_sleep_runs(dcp))
 		return -EOPNOTSUPP;
 	/* Refused before anything changes: the sleep RPCs' arguments come from the DT. */
 	if (!iomfb_v27_sleep_described(dcp)) {
@@ -1365,8 +1413,14 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 		return -EOPNOTSUPP;
 	}
 	if (!dcp->retain_dma || IS_ERR_OR_NULL(dcp->rtk) || !dcp->active || dcp->crashed || dcp->quiescing ||
-	    dcp->peer_owner || dcp->peer_reserved || dcp->secure_rtk)
+	    dcp->peer_owner || dcp->peer_reserved || dcp->secure_rtk) {
+		if (dcp_v27_j716s(dcp))
+			dev_info(dcp->dev, "J716s: sleep step refused: retain_dma %d rtk %d active %d crashed %d quiescing %d peer %d/%d secure %d\n",
+				 dcp->retain_dma, !IS_ERR_OR_NULL(dcp->rtk), dcp->active,
+				 dcp->crashed, dcp->quiescing, !!dcp->peer_owner,
+				 !!dcp->peer_reserved, !!dcp->secure_rtk);
 		return -EBUSY;
+	}
 	/* Mode-config suspend is the actual DRM scanout-owner boundary. No HPD
 	 * shortcut: external firmware still executes A484/A500/AFK and late IDLE.
 	 */
@@ -1466,12 +1520,12 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 	 */
 	if (soft_first) {
 		dcp_v27_display_stage(dcp, false, false, false);
-		ret = iomfb_v27_sleep_plain(dcp, false);
+		ret = dcp_v27_step(s, "plain-off", iomfb_v27_sleep_plain(dcp, false));
 		if (ret)
 			goto undo;
 		s->soft_off = true;
 		if (!dcp_v27_external(dcp)) {
-			ret = dcp_v27_disp_dart_stop_early(s);
+			ret = dcp_v27_step(s, "disp-dart", dcp_v27_disp_dart_stop_early(s));
 			if (ret) {
 				/* The refused sleep leaves the display as it found it. */
 				s->soft_off = false;
@@ -1479,10 +1533,11 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 				goto undo;
 			}
 		}
-		iomfb_v27_sleep_rpc(dcp, true, true);
+		dcp_v27_step(s, "ap-wake", iomfb_v27_sleep_rpc(dcp, true, true));
 	}
 	if (dcp_v27_two_stage(s) && v27_a115)
-		iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4);
+		dcp_v27_step(s, "q478",
+			     iomfb_v27_sleep_call(dcp, V27_SLEEP_PIPE_QUERY_478, NULL, 0, 4));
 	/* A484, actual state/status */
 	ret = dcp_v27_step(s, dcp_v27_tag_name(dcp, V27_SLEEP_SET_POWER_STATE).s,
 			   iomfb_v27_sleep_rpc(dcp, false, false));
@@ -1491,7 +1546,7 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 	s->power_off = true;
 	/* The AP's state word for the sleep, right after the hard off, as macOS. */
 	if (dcp_v27_two_stage(s) && v27_a115) {
-		ret = iomfb_v27_sleep_a115(dcp, false);
+		ret = dcp_v27_step(s, "A115", iomfb_v27_sleep_a115(dcp, false));
 		if (ret)
 			dev_warn(dcp->dev, "V27 sleep: A115(0): %d\n", ret);
 	}
@@ -1512,7 +1567,7 @@ static int dcp_v27_sleep_prepare(struct apple_dcp *dcp)
 	 * it has stopped already.
 	 */
 	if (!dcp_v27_external(dcp) && !soft_first) {
-		ret = dcp_v27_disp_dart_stop_early(s);
+		ret = dcp_v27_step(s, "disp-dart", dcp_v27_disp_dart_stop_early(s));
 		if (ret)
 			goto undo; /* nothing stopped: the display back on, the sleep refused */
 	}
@@ -1568,9 +1623,14 @@ static int dcp_v27_sleep_suspend(struct apple_dcp *dcp)
 	if (dcp->sleep_v27)
 		dcp->sleep_v27->steps_len = 0;
 	ret = dcp_v27_sleep_prepare(dcp);
-	/* Every external processor's step on one line, "call result@ms". */
+	/* Every external processor's step on one line, "call result@ms"; the J716s's too. */
 	if (dcp_v27_external(dcp))
 		dev_info(dcp->dev, "ext %u: sleep step:%s; result %d\n", dcp_v27_ext_nr(dcp),
+			 dcp->sleep_v27 && dcp->sleep_v27->steps_len ?
+			 dcp->sleep_v27->steps : " refused before its calls", ret);
+	else if (dcp_v27_j716s(dcp))
+		dev_info(dcp->dev, "J716s: sleep step (%s tags):%s; result %d\n",
+			 dcp->v27_sleep_tags->build,
 			 dcp->sleep_v27 && dcp->sleep_v27->steps_len ?
 			 dcp->sleep_v27->steps : " refused before its calls", ret);
 	/* A device whose suspend fails gets no resume: its ports are let go here. */
@@ -1630,6 +1690,10 @@ static int dcp_v27_sleep_restart(struct apple_dcp *dcp)
 static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
 {
 	int ret = dcp_v27_sleep_restart(dcp);
+
+	if (dcp_v27_j716s(dcp))
+		dev_info(dcp->dev, "J716s: wake step (%s tags): %d\n", dcp->v27_sleep_tags->build,
+			 ret);
 
 	/* Also when the restart failed: the port can go to another pipeline. */
 	dcp_v27_ext_replug(dcp, !ret);
@@ -2060,6 +2124,10 @@ static void dcp_v27_dpms_on(struct apple_dcp *dcp)
 static bool dcp_v27_sleep_selected(struct apple_dcp *dcp) { return false; }
 static void dcp_v27_sleep_invalidate(struct apple_dcp *dcp) { }
 static int dcp_v27_sleep_known(struct apple_dcp *dcp) { return 0; }
+static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
+{
+	return false;
+}
 static int dcp_v27_sleep_suspend(struct apple_dcp *dcp) { return -EOPNOTSUPP; }
 static int dcp_v27_sleep_resume(struct apple_dcp *dcp) { return -EOPNOTSUPP; }
 static bool dcp_v27_dpms_selected(struct apple_dcp *dcp) { return false; }

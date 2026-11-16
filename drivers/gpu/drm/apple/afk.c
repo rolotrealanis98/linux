@@ -136,7 +136,7 @@ struct apple_dcp_afkep *afk_init(struct apple_dcp *dcp, u32 endpoint,
 		return ERR_PTR(ret);
 
 	if (IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) &&
-	    dcp->v27_j714s && endpoint >= 0x20 && endpoint < 0x40)
+	    dcp->v27_sleep_eps && endpoint >= 0x20 && endpoint < 0x40)
 		WRITE_ONCE(dcp->sleep_v27_ep[endpoint - 0x20], afkep);
 	return afkep;
 
@@ -1113,7 +1113,7 @@ static void afk_compact_reply_worker(struct work_struct *work)
 		dev_err(r->ep->dcp->dev,
 			"AFK[ep:%02x]: failed to reply to compact service call: %d\n",
 			r->ep->endpoint, ret);
-	if (ret && r->ep->dcp->v27_j714s) {
+	if (ret && r->ep->dcp->v27_sleep_eps) {
 		guard(spinlock_irqsave)(&r->ep->lock);
 		r->ep->sleep_poisoned = true;
 	}
@@ -1713,14 +1713,15 @@ static void afk_recv_handle_init(struct apple_dcp_afkep *ep, u32 channel,
 					      ep->dcp->fw_compat == DCP_FIRMWARE_V_27_0);
 		if (ret == -ENOENT &&
 		    (ep->dcp->hw.iomfb_method_profile == DCP_IOMFB_METHODS_H17G ||
-		     ep->dcp->v27_j714s)) {
+		     ep->dcp->v27_sleep_eps)) {
 			/*
 			 * M5 (H17G) announces powerlog-service with only
 			 * ep-has-desc-mgr and interface-id, and firmware 27
 			 * its descriptor manager (md-manager) without EPIC
 			 * keys; match them by the announced name, as for
-			 * props-less announces. The second on the J714s only,
-			 * where its endpoints are started.
+			 * props-less announces. The second where its endpoints
+			 * are started: the J714s, and a J716s whose deep sleep
+			 * starts them (v27_sleep_eps).
 			 */
 			epic_name = NULL;
 			epic_class = NULL;
@@ -2415,7 +2416,7 @@ static bool afk_v27_sleep_reply(struct apple_dcp_afkep *ep, u32 channel,
 	u8 code;
 
 	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) ||
-	    !ep->dcp->v27_j714s || channel || type ||
+	    !ep->dcp->v27_sleep_eps || channel || type ||
 	    size != 12 || get_unaligned_le32(data + 4) != 4 ||
 	    get_unaligned_le16(data + 2))
 		return false;

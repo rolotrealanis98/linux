@@ -1748,9 +1748,10 @@ static int apple_soc_cpufreq_init(struct cpufreq_policy *policy)
 				slowest = p->frequency;
 				priv->park_pstate = p->driver_data;
 			}
-		cpumask_copy(&priv->park_cpus, policy->related_cpus);
+		/* policy->related_cpus is filled only after ->init() returns. */
+		cpumask_copy(&priv->park_cpus, policy->cpus);
 		priv->park = true;
-		for_each_cpu(i, policy->related_cpus) {
+		for_each_cpu(i, &priv->park_cpus) {
 			/* Pairs with the idle hooks' READ_ONCE(): priv is set up. */
 			smp_store_release(&per_cpu(apple_park_priv, i), priv);
 		}

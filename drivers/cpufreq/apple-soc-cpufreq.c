@@ -1911,11 +1911,24 @@ static int __init apple_soc_cpufreq_module_init(void)
 	}
 
 	/*
-	 * Start with boost enabled, so that the turbo-mode states are usable
-	 * without userspace having to turn boost on first. It can still be
-	 * switched off globally or per policy through sysfs.
+	 * Offer the boost switch only where the device tree marks states as
+	 * turbo-mode. Without boost states (T6050 J716s) the global and
+	 * per-policy "boost" files would exist but every write fails with
+	 * -EINVAL, and userspace that toggles boost (power-profiles-daemon's
+	 * cpufreq driver) then fails the whole profile change instead of
+	 * falling back to capping scaling_max_freq.
+	 *
+	 * With boost states, start with boost enabled, so that the turbo-mode
+	 * states are usable without userspace having to turn boost on first.
+	 * It can still be switched off globally or per policy through sysfs.
 	 */
-	apple_soc_cpufreq_driver.boost_enabled = true;
+	np = of_find_node_with_property(NULL, "turbo-mode");
+	if (np) {
+		of_node_put(np);
+		apple_soc_cpufreq_driver.boost_enabled = true;
+	} else {
+		apple_soc_cpufreq_driver.set_boost = NULL;
+	}
 
 	ret = cpufreq_register_driver(&apple_soc_cpufreq_driver);
 	if (ret) {

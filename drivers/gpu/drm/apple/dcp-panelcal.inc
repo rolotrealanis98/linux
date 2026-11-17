@@ -29,6 +29,8 @@
 #define PANELCAL_FW_PTUC	"apple/panel-ptuc.bin"
 /* Likewise <index>-od.bin: the pixel compensation (PDC) tables of the model's calibration bins */
 #define PANELCAL_FW_PDC		"apple/panel-od.bin"
+/* Likewise <index>-ca.bin: the lateral leakage tables */
+#define PANELCAL_FW_LL		"apple/panel-ca.bin"
 #define PANELCAL_TAG(a, b, c, d) ((u32)(d) | (u32)(c) << 8 | (u32)(b) << 16 | (u32)(a) << 24)
 #define PANELCAL_IRDC		PANELCAL_TAG('I', 'R', 'D', 'C')
 #define PANELCAL_ELVS		PANELCAL_TAG('E', 'L', 'V', 'S')
@@ -42,6 +44,11 @@
 
 #define PANELCAL_BLOCK_IRDC_DATA	118
 #define PANELCAL_BLOCK_CA		8
+#define PANELCAL_BLOCK_LL		37
+#define PANELCAL_LL_STRUCT	800
+#define PANELCAL_LL_TABLE	(2 * 17 * 17 * 17)
+#define PANELCAL_LL_LUTS	512
+#define PANELCAL_LL_CLUTS	1024
 #define PANELCAL_BLOCK_PDC_LUTS		27
 #define PANELCAL_BLOCK_PDC_CONFIG	28
 #define PANELCAL_BLOCK_PTUC_CONFIG	115
@@ -80,9 +87,14 @@
  * takes the panel out of normal mode for the load, which restarts the M3 afterwards.
  * 1: so bracketed (NormalModeEnable off, the load, on); 2: unbracketed, the crashing way.
  */
-static int panelcal_pdc;
+static int panelcal_pdc = 1;
 module_param(panelcal_pdc, int, 0644);
 MODULE_PARM_DESC(panelcal_pdc, "EXPERIMENTAL: send the PDC tables (0 no, 1 outside normal mode, 2 as is)");
+
+/* Lateral leakage goes the same way, inside the same bracket */
+static bool panelcal_ll = true;
+module_param(panelcal_ll, bool, 0644);
+MODULE_PARM_DESC(panelcal_ll, "EXPERIMENTAL: send the lateral leakage tables");
 
 #define PANELCAL_PROP_NORMAL_MODE	124
 
@@ -486,10 +498,7 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	u8 *cfg, *hdr, *buf;
 	int ret, k;
 
-	const int mode = READ_ONCE(panelcal_pdc);
-	bool bracket = false;
-
-	if (!mode)
+	if (!READ_ONCE(panelcal_pdc))
 		return -ENOENT;
 	if (!dcp->panelcal_ffr[0] || !dcp->panelcal_ffr[1])
 		return -ENODATA;
@@ -622,13 +631,6 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	put_unaligned_le32((u32)pdc->c2576 << 16, cfg + 2576);
 	dev_info(dcp->dev, "panel calibration: PDC config crc %#x, %u + %u LUT groups\n",
 		 crc32_le(~0, cfg, PANELCAL_PDC_CFG) ^ ~0U, pdc->ngroups[0], pdc->ngroups[1]);
-	if (mode == 1) {
-		ret = panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, false);
-		if (ret)
-			goto out;
-		bracket = true;
-		msleep(300);
-	}
 	ret = panelcal_send(dcp, PANELCAL_BLOCK_PDC_CONFIG, "PDC config, version", dver, cfg,
 			    PANELCAL_PDC_CFG, NULL, 0);
 	if (ret)
@@ -706,12 +708,201 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	dev_info(dcp->dev, "panel calibration: %u of %u PDC LUTs accepted, crc of all %#x, last result %d\n",
 		 sent, pdc->ngroups[0], crc ^ ~0U, ret);
 out:
-	if (bracket)
-		panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, true);
 	kvfree(buf);
 	kfree(hdr);
 	kfree(cfg);
 	kvfree(pdc);
+	release_firmware(fw);
+	return ret;
+}
+
+/*
+ * Lateral leakage (block 37): per region a buffer of 17x17x17 tables, one per brightness and
+ * channel, each the blend of two calibration bins' tables; the panel's place between the bins
+ * comes from its llc-* value in Apple's device tree. The same 800-byte struct goes with each.
+ */
+struct panelcal_ll_lut {
+	u32 bin, bright;
+	s32 temp;
+	u16 clut, region;
+	u8 chan;
+};
+
+static const u8 *panelcal_ll_table(const struct panelcal_ll_lut *luts, unsigned int n,
+				   const u8 **clut, u32 region, u32 bin, s32 temp, u32 bright,
+				   unsigned int chan)
+{
+	for (unsigned int i = 0; i < n; i++)
+		if (luts[i].region == region && luts[i].bin == bin && luts[i].temp == temp &&
+		    luts[i].bright == bright && luts[i].chan == chan)
+			return clut[luts[i].clut];
+	return NULL;
+}
+
+static int dcp_panelcal_ll(struct apple_dcp *dcp)
+{
+	s32 temps[PANELCAL_PDC_LIST], brights[PANELCAL_PDC_LIST], regions[PANELCAL_PDC_LIST];
+	s32 bins[PANELCAL_PDC_LIST];
+	unsigned int ntemps = 0, nbrights = 0, nregions = 0, nbins = 0, nluts = 0, ngroups = 0;
+	unsigned int i, j, r, c, lo = 0, thr_i, ntab, dn = 0;
+	const u8 *body, *slo = NULL, *dnit = NULL, **clut = NULL;
+	u32 tag, thr = 0, tenths = 0, bin, frac = 0, code = 0;
+	struct panelcal_ll_lut *luts = NULL;
+	size_t end, off = 12, len, size;
+	const struct firmware *fw;
+	u8 *st = NULL, *buf = NULL, *w;
+	int ret, color;
+	u16 ver;
+
+	if (!READ_ONCE(panelcal_ll))
+		return -ENOENT;
+	ret = panelcal_file(dcp, PANELCAL_FW_LL, &fw, &end);
+	if (ret)
+		return ret;
+	ret = -ENOMEM;
+	clut = kvcalloc(PANELCAL_LL_CLUTS, sizeof(*clut), GFP_KERNEL);
+	luts = kvcalloc(PANELCAL_LL_LUTS, sizeof(*luts), GFP_KERNEL);
+	st = kzalloc(PANELCAL_LL_STRUCT, GFP_KERNEL);
+	if (!clut || !luts || !st)
+		goto out;
+	ret = -EINVAL;
+	while (panelcal_next(fw->data, end, &off, &tag, &ver, &body, &len)) {
+		if (tag == PANELCAL_TAG('C', 'L', 'U', 'T') && ver == 1 &&
+		    len >= 2 + PANELCAL_LL_TABLE) {
+			if (get_unaligned_le16(body) < PANELCAL_LL_CLUTS)
+				clut[get_unaligned_le16(body)] = body + 2;
+		} else if (tag == PANELCAL_TAG('3', 'L', 'U', 'T') && ver == 3 && len >= 28) {
+			struct panelcal_ll_lut *l = &luts[nluts];
+
+			if (nluts == PANELCAL_LL_LUTS)
+				goto out;
+			l->bin = get_unaligned_le32(body + 6);
+			l->temp = div_s64((s64)(s16)get_unaligned_le16(body + 14) << 16, 10);
+			l->bright = (u32)get_unaligned_le16(body + 16) << 16;
+			l->chan = body[18] == 'R' ? 0 : body[18] == 'G' ? 1 : 2;
+			l->clut = get_unaligned_le16(body + 22);
+			l->region = get_unaligned_le16(body + 24);
+			if (l->clut >= PANELCAL_LL_CLUTS)
+				goto out;
+			/* The same in every record */
+			if (nluts && (code != get_unaligned_le32(body + 2) ||
+				      thr != (u32)get_unaligned_le16(body + 10) << 16))
+				goto out;
+			code = get_unaligned_le32(body + 2);
+			thr = (u32)get_unaligned_le16(body + 10) << 16;
+			tenths = div_u64((u64)get_unaligned_le16(body + 12) << 16, 10);
+			if (!panelcal_set_add(temps, &ntemps, l->temp) ||
+			    !panelcal_set_add(brights, &nbrights, l->bright) ||
+			    !panelcal_set_add(regions, &nregions, l->region) ||
+			    !panelcal_set_add(bins, &nbins, l->bin))
+				goto out;
+			nluts++;
+		} else if (tag == PANELCAL_TAG('3', 'S', 'L', 'O') && ver == 1 && len >= 68) {
+			slo = body;
+		} else if (tag == PANELCAL_TAG('D', 'N', 'I', 'T') && ver == 1 && len >= 2) {
+			dn = get_unaligned_le16(body);
+			if (dn > PANELCAL_PDC_LIST || len < 2 + 4 * (size_t)dn)
+				goto out;
+			dnit = body + 2;
+		}
+	}
+	if (!nluts || !slo || !dnit)
+		goto out;
+	/* The panel's bin: the value of the color the file names */
+	color = (code & 0xff) == 'R' ? 0 : (code & 0xff) == 'G' ? 1 : (code & 0xff) == 'B' ? 2 : -1;
+	if (color < 0)
+		goto out;
+	kernel_fpu_begin();
+	bin = dcp->panelcal_llc_found & BIT(color) ?
+		dcp_panelcal_fp_llc_bin(dcp->panelcal_llc[color]) : 80 << 16;
+	bin = clamp_t(u32, bin, bins[0], bins[nbins - 1]);
+	while (lo + 2 < nbins && bin >= (u32)bins[lo + 1])
+		lo++;
+	if (nbins > 1)
+		frac = dcp_panelcal_fp_ratio(bin - bins[lo], bins[lo + 1] - bins[lo]);
+	kernel_fpu_end();
+	thr_i = panelcal_set_find(brights, nbrights, thr) + 1;
+	for (i = 0; i < ntemps; i++)
+		ngroups += i == ntemps - 1 ? nbrights : thr_i;
+	ntab = 3 * ngroups;
+	size = 12 + 6 * (size_t)ngroups + 2 + (size_t)ntab * PANELCAL_LL_TABLE;
+	dev_info(dcp->dev, "panel calibration: lateral leakage: value %#x: bin %u between %d and %d, weight %#x; %u tables per region\n",
+		 dcp->panelcal_llc[color], bin, bins[lo], bins[nbins > 1 ? lo + 1 : lo], frac, ntab);
+
+	put_unaligned_le32(3, st);
+	for (i = 0; i < ntemps; i++)
+		put_unaligned_le32(temps[i], st + 0x8 + 4 * i);
+	for (i = 0; i < nbrights; i++)
+		put_unaligned_le32(brights[i], st + 0x58 + 4 * i);
+	for (i = 0; i < nregions; i++)
+		put_unaligned_le32(regions[i], st + 0xa8 + 4 * i);
+	put_unaligned_le32(thr, st + 0xf8);
+	put_unaligned_le32(tenths, st + 0xfc);
+	put_unaligned_le16(dn, st + 0x100);
+	for (i = 0; i < dn; i++) {
+		put_unaligned_le32((u32)get_unaligned_le16(dnit + 2 * i) << 16, st + 0x104 + 4 * i);
+		put_unaligned_le32((u32)get_unaligned_le16(dnit + 2 * (dn + i)) << 16,
+				   st + 0x154 + 4 * i);
+	}
+	memcpy(st + 0x1a4, slo, 68);
+	put_unaligned_le16(ntemps, st + 0x1e8);
+	put_unaligned_le16(nbrights, st + 0x1ea);
+	put_unaligned_le16(nregions, st + 0x1ec);
+	put_unaligned_le64(size, st + 0x1f8);
+	dev_info(dcp->dev, "panel calibration: lateral leakage struct crc %#x, buffer %zu bytes\n",
+		 crc32_le(~0, st, PANELCAL_LL_STRUCT) ^ ~0U, size);
+	ret = -ENOMEM;
+	buf = kvzalloc(size, GFP_KERNEL);
+	if (!buf)
+		goto out;
+	for (r = 0; r < nregions; r++) {
+		memcpy(buf, "TULC", 4);
+		put_unaligned_le16(4, buf + 4);
+		put_unaligned_le32(regions[r], buf + 6);
+		put_unaligned_le16(0, buf + 10);
+		for (i = 0; i < ngroups; i++)
+			for (c = 0; c < 3; c++)
+				put_unaligned_le16(3 * i + c, buf + 12 + 6 * i + 2 * c);
+		put_unaligned_le16(ntab, buf + 12 + 6 * ngroups);
+		w = buf + 12 + 6 * ngroups + 2;
+		ret = 0;
+		for (i = 0; !ret && i < ntemps; i++)
+			for (j = 0; !ret && j < (i == ntemps - 1 ? nbrights : thr_i); j++)
+				for (c = 0; c < 3; c++, w += PANELCAL_LL_TABLE) {
+					const u8 *a = panelcal_ll_table(luts, nluts, clut, regions[r],
+									bins[lo], temps[i],
+									brights[j], c);
+					const u8 *b = !frac ? a :
+						panelcal_ll_table(luts, nluts, clut, regions[r],
+								  bins[lo + 1], temps[i],
+								  brights[j], c);
+
+					if (!a || !b) {
+						ret = -EINVAL;
+						break;
+					}
+					if (!frac) {
+						memcpy(w, a, PANELCAL_LL_TABLE);
+						continue;
+					}
+					kernel_fpu_begin();
+					dcp_panelcal_fp_blend(w, a, b, PANELCAL_LL_TABLE / 2, frac);
+					kernel_fpu_end();
+				}
+		if (ret)
+			break;
+		dev_info(dcp->dev, "panel calibration: lateral leakage region %d buffer crc %#x\n",
+			 regions[r], crc32_le(~0, buf, size) ^ ~0U);
+		ret = panelcal_send(dcp, PANELCAL_BLOCK_LL, "lateral leakage, region", regions[r],
+				    st, PANELCAL_LL_STRUCT, buf, size);
+		if (ret)
+			break;
+	}
+out:
+	kvfree(buf);
+	kfree(st);
+	kvfree(luts);
+	kvfree(clut);
 	release_firmware(fw);
 	return ret;
 }
@@ -838,6 +1029,7 @@ static int dcp_panelcal_load(struct apple_dcp *dcp)
 	size_t off;
 	u8 hdr[20], cfg[28];
 	u8 *buf;
+	bool bracket;
 	int ret;
 
 	if (dcp->fw_compat != DCP_FIRMWARE_V_27_0 || !dcp->main_display)
@@ -849,9 +1041,25 @@ static int dcp_panelcal_load(struct apple_dcp *dcp)
 	ret = dcp_panelcal_ca(dcp);
 	if (ret && ret != -ENOENT)
 		dev_warn(dcp->dev, "panel calibration: CA data: %d\n", ret);
-	ret = dcp_panelcal_pdc(dcp);
-	if (ret && ret != -ENOENT)
-		dev_warn(dcp->dev, "panel calibration: PDC: %d\n", ret);
+	/*
+	 * PDC and lateral leakage outside the panel's normal mode, as macOS's loader: that stops
+	 * the firmware's M3, and the way back starts it with the tables in place. (PDC sent in
+	 * normal mode made the M3 assert.)
+	 */
+	bracket = READ_ONCE(panelcal_pdc) == 1 &&
+		  !panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, false);
+	if (bracket)
+		msleep(300);
+	if (bracket || READ_ONCE(panelcal_pdc) == 2) {
+		ret = dcp_panelcal_pdc(dcp);
+		if (ret && ret != -ENOENT)
+			dev_warn(dcp->dev, "panel calibration: PDC: %d\n", ret);
+		ret = dcp_panelcal_ll(dcp);
+		if (ret && ret != -ENOENT)
+			dev_warn(dcp->dev, "panel calibration: lateral leakage: %d\n", ret);
+	}
+	if (bracket)
+		panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, true);
 	ret = dcp_panelcal_ptuc(dcp);
 	if (ret && ret != -ENOENT)
 		dev_warn(dcp->dev, "panel calibration: PTUC: %d\n", ret);

@@ -816,6 +816,9 @@ struct apple_dcp {
 	unsigned int panelcal_tries;
 	/* The panel's first-frame response indexes (ADT), 0.16; 0 if not known */
 	u32 panelcal_ffr[2];
+	/* Its lateral leakage values (ADT) for red, green, blue, 0.24; a bit each when known */
+	u32 panelcal_llc[3];
+	u8 panelcal_llc_found;
 	/* Stopped and not restarted, which outlives a suspend that gets refused. */
 	bool s2r_fw_down;
 	/* DCPEXT kept down through a dark wake, see dcp_s2r_dark_finish(). */

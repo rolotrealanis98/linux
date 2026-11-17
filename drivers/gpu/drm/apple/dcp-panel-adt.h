@@ -16,6 +16,9 @@ struct dcp_panel_adt {
 	enum dcp_panel_gamut gamut;
 	/* /arm-io/disp0 first-frame-response and -high as stored, big-endian; 0 if absent */
 	u32 first_frame_response, first_frame_response_high;
+	/* /arm-io/disp0 llc-red, -green, -blue as stored, big-endian; llc_found has a bit each */
+	u32 llc[3];
+	u8 llc_found;
 	bool found;
 };
 

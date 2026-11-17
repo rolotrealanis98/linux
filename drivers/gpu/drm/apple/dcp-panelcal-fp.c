@@ -60,3 +60,23 @@ void dcp_panelcal_fp_blend(u8 *out, const u8 *a, const u8 *b, unsigned int n, u3
 		put_unaligned_le16((u16)(int)((double)r + 0.5), out + 2 * i);
 	}
 }
+
+/* Lateral leakage: the panel's bin, 16.16, from its device-tree value (a 0.24 fraction of 100) */
+u32 dcp_panelcal_fp_llc_bin(u32 v)
+{
+	float f = (float)v / 16777216.0f;
+
+	f *= 100.0f;
+	f *= 65536.0f;
+	return (u32)(int)((double)f + 0.5);
+}
+
+/* A float's bits: @num / @den */
+u32 dcp_panelcal_fp_ratio(u32 num, u32 den)
+{
+	float f = (float)num / (float)den;
+	u32 bits;
+
+	memcpy(&bits, &f, sizeof(bits));
+	return bits;
+}

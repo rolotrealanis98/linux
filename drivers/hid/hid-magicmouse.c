@@ -62,6 +62,15 @@ module_param(report_undeciphered, bool, 0644);
 MODULE_PARM_DESC(report_undeciphered, "Report undeciphered multi-touch state field using a MSC_RAW event");
 
 /*
+ * MTP trackpads announce contacts while they hover above the pad and keep
+ * them for a few frames after they lift, often with a touch area already
+ * large enough for user space to take them for touches. Read on every report.
+ */
+static bool mtp_hover_filter = true;
+module_param(mtp_hover_filter, bool, 0644);
+MODULE_PARM_DESC(mtp_hover_filter, "Report only MTP contacts the controller says are touching the pad (default Y)");
+
+/*
  * Waveform shaping, writable at runtime and applied on the next effect
  * upload. Zero means "use the per-transport default": the MTP machines keep
  * the values their firmware was tuned with, the SPI actuator in a J313 needs
@@ -1006,6 +1015,19 @@ static bool magicmouse_haptic_click(struct magicmouse_sc *msc, u32 pressure,
 				    bool firmware_button);
 
 /*
+ * Whether the controller has the contact on the pad. On a J716s in normal use,
+ * a third of the contacts the controller announced never touched down (mostly
+ * hands hovering at the side edges while typing), and 142 hovering or
+ * after-lift records in two minutes had a touch area past the one at which
+ * libinput begins a touch on this pad.
+ */
+static bool magicmouse_mtp_touching(const struct tp_finger *f)
+{
+	return f->state >= TP_CONTACT_TOUCH_DOWN &&
+	       f->state <= TP_CONTACT_LIFTING;
+}
+
+/*
  * The T6041 (M4 Max) MTP trackpad's records carry the contact ID, its state
  * and the controller's class in their first three bytes; the class is 1 for a
  * thumb, 2 and 3 for fingers, 6 and above for palms. Recorded on a J616C:
@@ -1332,6 +1354,10 @@ static int magicmouse_raw_event_mtp(struct hid_device *hdev,
 	for (i = 0; i < tp_hdr->num_fingers; i++) {
 		f = (struct tp_finger *)(data + hdr_sz + i * touch_sz);
 		if (!msc->mtp_c1fe && le16_to_int(f->touch_major) == 0)
+			continue;
+		/* The C1FE records' first bytes have not been decoded. */
+		if (!msc->mtp_c1fe && mtp_hover_filter &&
+		    !magicmouse_mtp_touching(f))
 			continue;
 
 		hid_dbg(hdev, "ev x:%04x y:%04x\n", le16_to_int(f->abs_x),

@@ -666,6 +666,38 @@
 #include "t6050-j716s-sleep-adt.dtsi"
 
 /*
+ * Where this machine differs from the J714s values above, after the K116s's deep sleep
+ * (aurora-silicon/linux#2075, the same M5 Pro on 27.2):
+ *
+ * - The PMP's SRAM kept over a sleep: this machine's macOS 27.3 (26C5035r) pmp0 segment-ranges
+ *   give __TEXT 0x56000 bytes and __DATA 0x9b000 bytes from 0x56000, as the K116s's on 27.2;
+ *   the J714s's 0x58000 is 27.0's. The PMP is not started on this tree today, so this only
+ *   matters once it is.
+ * - The panel's video interface is opened 10 ms after its announcement, the K116s's value (its
+ *   plug took 2.9 ms and the J714s's 2500 us opened it too early). Only read by the panel's AV
+ *   service, which runs here only with appledrm.j716s_deep_sleep=1 appledrm.j716s_panel_av=1.
+ * - The GPU domain is raised with floor 4 after a sleep, the J714s's boot value (0x1404034f);
+ *   this machine's boot floor has not been read.
+ *
+ * Kept from the J714s, not measured here: the four clock park words (0x80100400; the K116s's
+ * macOS writes 0x80100000), the commit schedule and the MCC stop on reg[22..26]. The skipped
+ * pins stay: unlike the K116s's, this machine's ADT has no-restore-gpio-pins (6 7 5 141 112).
+ * There is no dcp-exclave-mailbox in its ADT (the secure port node is dcp-sleep-27.3-v2's
+ * guess, used only with appledrm.j716s_sleep=3).
+ */
+&pmp0 {
+	apple,sram-keep = <0x56000 0x9b000>;
+};
+
+&dcp {
+	apple,panel-video-open-delay-us = <10000>;
+};
+
+&sgx {
+	apple,sleep-ps-min = <4>;
+};
+
+/*
  * No CPM boot writes on the J716s. They are XNU's writes to the clusters' CPM blocks (ADT
  * cpm-impl-reg, 0x2_1[012]e40000), recorded at macOS boot on the J714s. On a running J716s the
  * first alone (cluster 0, +0x8000 <- 0) stops the machine within about 10 s, with or without the

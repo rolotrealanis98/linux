@@ -1827,6 +1827,9 @@ static int dcp_v27_sleep_resume(struct apple_dcp *dcp)
 
 	/* Also when the restart failed: the port can go to another pipeline. */
 	dcp_v27_ext_replug(dcp, !ret);
+	/* A restarted firmware has lost the panel's compensation tables: again after the mode set */
+	if (!ret && dcp->main_display)
+		dcp_panelcal_schedule(dcp, 2000);
 	return ret;
 }
 

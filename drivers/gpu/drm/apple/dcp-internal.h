@@ -811,6 +811,9 @@ struct apple_dcp {
 	int secure_map_ret;
 	s64 secure_map_us;
 	struct delayed_work secure_poll_wq;
+	/* EXPERIMENTAL (K116s): the panel's compensation tables, sent after each firmware start */
+	struct delayed_work panelcal_wq;
+	unsigned int panelcal_tries;
 	/* Stopped and not restarted, which outlives a suspend that gets refused. */
 	bool s2r_fw_down;
 	/* DCPEXT kept down through a dark wake, see dcp_s2r_dark_finish(). */
@@ -1234,6 +1237,7 @@ int dcp_backlight_update(struct apple_dcp *dcp);
 s32 dcp_ext_backlight_value(struct apple_dcp *dcp);
 bool dcp_has_panel(struct apple_dcp *dcp);
 extern int fw27_panel_boot_mode;
+void dcp_panelcal_schedule(struct apple_dcp *dcp, unsigned int delay_ms);
 extern int v27_wake_modeset;
 extern int notify_clients_form;
 

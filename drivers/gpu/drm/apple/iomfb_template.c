@@ -4562,6 +4562,11 @@ static void res_is_main_display(struct apple_dcp *dcp, void *out, void *cookie)
 	}
 
 	dcp->active = true;
+#if (DCP_FW_H17(DCP_FW_VER) && DCP_FW_VER >= DCP_FW_VERSION(27, 0, 0))
+	/* The panel's compensation tables, once the first mode set has had its time */
+	if (dcp->main_display)
+		dcp_panelcal_schedule(dcp, 3000);
+#endif
 	/*
 	 * Desktop 26.x publishes no initial panel level that would register
 	 * the backlight (see iomfb_cb_pr_publish()): the DRM master registers

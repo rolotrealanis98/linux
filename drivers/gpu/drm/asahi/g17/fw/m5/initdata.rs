@@ -2792,7 +2792,8 @@ pub(crate) const J716S: Board = Board {
     min_parameter_buffer: 0x0020_0000,
     render_pool: (0x40_0000, 1 << 32),
     // No controller configuration has been measured for a J716s part: the firmware keeps its
-    // own power budget, as on a J714 part whose calibration words differ.
+    // own power budget unless m5_controller_defaults gives it
+    // encode_m5_policy_controller_defaults_j716s.
     calibration: None,
     controller_defaults: None,
     idle_standby_us: None,
@@ -3501,7 +3502,7 @@ pub(crate) const M5_MAX_REGISTER_WINDOWS: usize = J775D_REGISTER_WINDOWS.len();
 
 impl Board {
     /// An M5 Pro board (T6050, two clusters of ten cores) with no power-controller configuration
-    /// of its own: the J716s.
+    /// of its own: the J716s, which can take [`encode_m5_policy_controller_defaults_j716s`].
     pub(crate) fn is_m5_pro_without_controller(&self) -> bool {
         self.controller_defaults.is_none()
             && self.chip_id == 0x6050
@@ -4297,6 +4298,148 @@ pub(crate) fn encode_m5_policy_controller_defaults_j716c(out: &mut [u8]) -> Resu
     put_u32(policy, 0x12280, 0x44b1_8000);
     put_u32(policy, 0x11a64, 3);
     put_u32(policy, 0x11a74, 1);
+    Ok(())
+}
+
+/// A two-cluster part's GPU leakage inputs, in half units: each cluster's cores, the SRAM of
+/// every cluster and the AFR domain, as the controller defaults write them at 0x121b0, 0x12230
+/// and 0x12280.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub(crate) struct M5Leakage {
+    pub(crate) cluster_halves: [u32; 2],
+    pub(crate) sram_halves: u32,
+    pub(crate) afr_halves: u32,
+}
+
+const fn bits_of(value: u64, low: u32, width: u32) -> u32 {
+    ((value >> low) & ((1 << width) - 1)) as u32
+}
+
+/// `halves` / 2 as an IEEE single, exact below 2^24 halves. No kernel FPU use.
+const fn halves_to_f32_bits(halves: u32) -> u32 {
+    if halves == 0 {
+        return 0;
+    }
+    let msb = 31 - halves.leading_zeros();
+    ((msb - 1 + 127) << 23) | ((halves << (23 - msb)) & 0x7f_ffff)
+}
+
+impl M5Leakage {
+    /// J714's reference part: the leakage [`encode_m5_policy_controller_defaults`] writes
+    /// (1710 and 1680, SRAM 148, AFR 428).
+    pub(crate) const J714_REFERENCE: Self =
+        Self { cluster_halves: [3420, 3360], sram_halves: 296, afr_halves: 856 };
+
+    /// Decodes a part's three leakage calibration words (the boot loader's
+    /// `apple,leakage-calibration-words`, from the fuses at 0x74198 in the GPU die's PMGR window
+    /// at 0x88300000). Read as one 96-bit little-endian value: bits [0:8) are a divisor d (1 or
+    /// 2), [8:22) and [22:36) the clusters' fields (leakage 2 x field / d), [37:46) the SRAM
+    /// field (field / d) and [56:68) the AFR leakage. This gives the hard-coded leakage of J714's
+    /// and J716c's reference parts exactly (aurora #2080). Bit 36, which may belong to the SRAM
+    /// field (half a unit), is left out. `None` unless every value lies within half and twice
+    /// J714's reference.
+    pub(crate) const fn decode_two_cluster(words: &[u32; 3]) -> Option<Self> {
+        let Some(leakage) = Self::decode_fields(words) else {
+            return None;
+        };
+        let reference = Self::J714_REFERENCE;
+        let pairs = [
+            (leakage.cluster_halves[0], reference.cluster_halves[0]),
+            (leakage.cluster_halves[1], reference.cluster_halves[1]),
+            (leakage.sram_halves, reference.sram_halves),
+            (leakage.afr_halves, reference.afr_halves),
+        ];
+        let mut index = 0;
+        while index < pairs.len() {
+            let (value, reference) = pairs[index];
+            if value < reference / 2 || value > reference * 2 {
+                return None;
+            }
+            index += 1;
+        }
+        Some(leakage)
+    }
+
+    /// The fields of [`M5Leakage::decode_two_cluster`], unchecked but for the divisor.
+    const fn decode_fields(words: &[u32; 3]) -> Option<Self> {
+        let low = words[0] as u64 | (words[1] as u64) << 32;
+        let divisor = bits_of(low, 0, 8);
+        if divisor != 1 && divisor != 2 {
+            return None;
+        }
+        Some(Self {
+            cluster_halves: [4 * bits_of(low, 8, 14) / divisor, 4 * bits_of(low, 22, 14) / divisor],
+            sram_halves: 2 * bits_of(low, 37, 9) / divisor,
+            afr_halves: 2 * (bits_of(low, 56, 8) | (words[2] & 0xf) << 8),
+        })
+    }
+}
+
+const _: () = {
+    // J714's reference words give the leakage its defaults hard-code, as IEEE singles.
+    match M5Leakage::decode_two_cluster(&[0xd2035701, 0xac3a1280, 0x0a281d81]) {
+        Some(leakage) => {
+            assert!(leakage.cluster_halves[0] == M5Leakage::J714_REFERENCE.cluster_halves[0]);
+            assert!(leakage.cluster_halves[1] == M5Leakage::J714_REFERENCE.cluster_halves[1]);
+            assert!(leakage.sram_halves == M5Leakage::J714_REFERENCE.sram_halves);
+            assert!(leakage.afr_halves == M5Leakage::J714_REFERENCE.afr_halves);
+        }
+        None => panic!(),
+    }
+    assert!(halves_to_f32_bits(3420) == 0x44d5_c000);
+    assert!(halves_to_f32_bits(3360) == 0x44d2_0000);
+    assert!(halves_to_f32_bits(296) == 0x4314_0000);
+    assert!(halves_to_f32_bits(856) == 0x43d6_0000);
+    // J716c's reference words give the leakage its defaults hard-code (clusters 0 and 1: 2633
+    // and 2553, SRAM 205.5, AFR 1420; divisor 2). An M5 Max is not a two-cluster part: its AFR
+    // value is outside the M5 Pro's range, so the checked decode refuses it.
+    match M5Leakage::decode_fields(&[0x7e4a4902, 0x8c4f3362, 0x96be56e5]) {
+        Some(leakage) => {
+            assert!(leakage.cluster_halves[0] == 5266 && leakage.cluster_halves[1] == 5106);
+            assert!(leakage.sram_halves == 411 && leakage.afr_halves == 2840);
+            assert!(halves_to_f32_bits(5266) == 0x4524_9000);
+            assert!(halves_to_f32_bits(5106) == 0x451f_9000);
+            assert!(halves_to_f32_bits(411) == 0x434d_8000);
+            assert!(halves_to_f32_bits(2840) == 0x44b1_8000);
+        }
+        None => panic!(),
+    }
+    assert!(M5Leakage::decode_two_cluster(&[0x7e4a4902, 0x8c4f3362, 0x96be56e5]).is_none());
+};
+
+/// Controller inputs for J716s: J714's (the M5 Pro's), with the part's own leakage.
+///
+/// Where each group comes from, and what the J716s has:
+/// - Leakage inputs (0x121b0, 0x12230, 0x12280): per part, from its fuses. Here `leakage`,
+///   which the caller decodes from the boot loader's calibration words at every boot.
+/// - Relative power curves (HW data 0x19e4 and 0x1a64) and the maximum power (98884 mW at
+///   [`M5_POLICY_MAXIMUM_POWER`] and its copies): macOS computes them per part from the
+///   perf-state voltages and the leakage with a power model that is not known. J714's stay.
+///   With the J716s's higher voltages and leakage the firmware's estimate of the top state
+///   comes out a few percent above this maximum, so it may hold the GPU just below the top
+///   state under a sustained full load, where macOS might not.
+/// - The controllers' gains, thresholds, filters and timings: the kext's configuration for the
+///   core type, which the J716s shares with J714 (0x18). Its ADT GPU node has no power
+///   tunables, and 143 of its PMP node's 146 are J714s's (the others: the GPU voltages and the
+///   firmware build's segment ranges).
+/// - The AON temperature records and the sensor channel masks: the ADT aon-ptd rows RT0g, RT1g
+///   and RT0r are J714's, on the same die.
+pub(crate) fn encode_m5_policy_controller_defaults_j716s(out: &mut [u8], leakage: &M5Leakage)
+    -> Result<(), InitdataError> {
+    encode_m5_policy_controller_defaults(out)?;
+    set_m5_policy_leakage(out, leakage)
+}
+
+/// Writes a two-cluster part's leakage inputs into the policy of `out` (a bundle), in its
+/// 26A428 form.
+pub(crate) fn set_m5_policy_leakage(out: &mut [u8], leakage: &M5Leakage)
+    -> Result<(), InitdataError> {
+    let policy = m5_policy_source(out)?;
+    for (index, &halves) in leakage.cluster_halves.iter().enumerate() {
+        put_u32(policy, 0x121b0 + index * 4, halves_to_f32_bits(halves));
+        put_u32(policy, 0x12230 + index * 4, halves_to_f32_bits(leakage.sram_halves));
+    }
+    put_u32(policy, 0x12280, halves_to_f32_bits(leakage.afr_halves));
     Ok(())
 }
 

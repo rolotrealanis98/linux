@@ -158,7 +158,7 @@ module! {
         },
         m5_controller_defaults: u32 {
             default: 0,
-            description: "M5 Pro: 1 gives a board without a GPU power-controller configuration of its own (J716s) the M5 Pro's (J714's); 0 (default) leaves the firmware's default budget",
+            description: "M5 Pro: 1 gives a board without a GPU power-controller configuration of its own (J716s) one: the M5 Pro's, with the part's leakage from its calibration words; 0 (default) leaves the firmware's default budget",
         },
         m5_light_effort: u32 {
             default: 0,

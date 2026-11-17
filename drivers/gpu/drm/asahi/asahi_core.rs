@@ -156,6 +156,10 @@ module! {
             default: 0,
             description: "M5: retire commands whose completion notification never came (completion sweep); 0 off (default), 1 on. Also switchable at runtime: /sys/class/drm/card0/device/completion_sweep",
         },
+        m5_controller_defaults: u32 {
+            default: 0,
+            description: "M5 Pro: 1 gives a board without a GPU power-controller configuration of its own (J716s) the M5 Pro's (J714's); 0 (default) leaves the firmware's default budget",
+        },
         m5_light_effort: u32 {
             default: 0,
             description: "M5 Pro: firmware effort (1..65535 of 65536) for quiet GPU work that a thread waits for; 0 (default) keeps full effort. Also switchable at runtime: /sys/class/drm/card0/device/light_effort",

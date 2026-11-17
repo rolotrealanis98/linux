@@ -152,6 +152,10 @@ module! {
             default: 0,
             description: "M5: let the firmware's recovery reason steer blame as on G17P (1); 0 only logs it",
         },
+        m5_light_effort: u32 {
+            default: 0,
+            description: "M5 Pro: firmware effort (1..65535 of 65536) for quiet GPU work that a thread waits for; 0 (default) keeps full effort. Also switchable at runtime: /sys/class/drm/card0/device/light_effort",
+        },
         m5_pause_timeout_us: u32 {
             default: 0,
             description: "M5 experiment: firmware scheduling (DSF) pause timeout, us (HW data +0x271c; 0 keeps the encoded 150, 0xffffffff waits without a timeout)",

@@ -11,6 +11,33 @@
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
+/// GPU busy time across all clients and engines, in ns: the union of the stages charged, for
+/// the GPU busy share (G17 power). Stages of different queues can retire out of the order they
+/// started, so it can fall short of the union, never exceed it.
+pub(crate) static BUSY_NS: AtomicU64 = AtomicU64::new(0);
+/// The latest stage end counted in [`BUSY_NS`], in timer ticks.
+static BUSY_MARK: AtomicU64 = AtomicU64::new(0);
+/// Longest single stage charged since the governor last read it, in ns.
+pub(crate) static MAX_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Adds the part of `start..end` after `mark` to `total` and moves `mark` to `end`.
+fn union_add(mark: &AtomicU64, total: &AtomicU64, start: u64, end: u64, frequency_hz: u32) {
+    let limit = u64::from(frequency_hz).saturating_mul(DISCONTINUITY_S);
+    let mut covered = mark.load(Ordering::Relaxed);
+    let from = loop {
+        let jumped = covered.saturating_sub(start) > limit;
+        let from = if jumped { start } else { start.max(covered) };
+        if from >= end {
+            return;
+        }
+        match mark.compare_exchange_weak(covered, end, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => break from,
+            Err(value) => covered = value,
+        }
+    };
+    total.fetch_add(ticks_to_ns(end - from, frequency_hz), Ordering::Relaxed);
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum Engine {
     Vertex,
@@ -38,6 +65,8 @@ impl Client {
             return;
         }
         let ns = ticks_to_ns(end - start, frequency_hz);
+        MAX_NS.fetch_max(ns, Ordering::Relaxed);
+        union_add(&BUSY_MARK, &BUSY_NS, start, end, frequency_hz);
         let counter = &self.ns[engine as usize];
         let mut old = counter.load(Ordering::Relaxed);
         loop {
@@ -317,5 +346,28 @@ mod tests {
             thread.join().unwrap();
         }
         assert_eq!(client.snapshot(), [0, 0, 80_000_000]);
+    }
+
+    #[test]
+    fn busy_union_counts_overlap_once_and_restarts_after_a_jump() {
+        let (mark, total) = (AtomicU64::new(0), AtomicU64::new(0));
+        // Vertex 0..24000 ticks and fragment 12000..48000 overlap: 2 ms of union.
+        union_add(&mark, &total, 1, 24_001, HZ);
+        union_add(&mark, &total, 12_001, 48_001, HZ);
+        assert_eq!(total.load(Ordering::Relaxed), 2_000_000);
+        // A stage inside the mark adds nothing; a later one adds only its own time.
+        union_add(&mark, &total, 30_000, 40_000, HZ);
+        union_add(&mark, &total, 72_001, 96_001, HZ);
+        assert_eq!(total.load(Ordering::Relaxed), 3_000_000);
+        // A stage that retires after a later-starting one counts only past the mark.
+        union_add(&mark, &total, 90_001, 120_001, HZ);
+        assert_eq!(total.load(Ordering::Relaxed), 4_000_000);
+        // An old stage within a minute of the mark adds nothing; timestamps that jumped back by
+        // more than a minute restart the mark.
+        union_add(&mark, &total, 1, 24_001, HZ);
+        assert_eq!(total.load(Ordering::Relaxed), 4_000_000);
+        union_add(&mark, &total, 1_000_000_000_000, 1_000_000_024_000, HZ);
+        union_add(&mark, &total, 1, 24_001, HZ);
+        assert_eq!(total.load(Ordering::Relaxed), 6_000_000);
     }
 }

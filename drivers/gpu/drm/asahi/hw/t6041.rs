@@ -53,6 +53,7 @@ pub(super) const BASE: Config = Config {
     recovery_slot_keys: None,
     gpu_generation: GpuGen::G16,
     firmware: fw::variant::Firmware::Identified(&[]),
+    light_effort: None,
     core_layout: CoreLayout {
         cores: Some((4, 40)),
         alternate_core_masks: None,

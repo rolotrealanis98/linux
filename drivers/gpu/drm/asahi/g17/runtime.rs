@@ -1591,7 +1591,13 @@ impl compute::Host for ComputeHost<'_> {
         self.shared.note_gpu_activity();
         self.effort.submit();
         self.effort.note_waiters(super::now_ns(), super::fence::waiters());
-        super::Firmware::apply_shared_effort(self.init, self.effort, self.port, super::power::FULL_EFFORT)
+        self.port.report_busy();
+        super::Firmware::apply_shared_effort(
+            self.init,
+            self.effort,
+            self.port,
+            super::power::submission_effort(),
+        )
     }
     fn submit_m5(&mut self, submission: &super::fw::m5::queue::HardwareSubmission) -> Result {
         self.regs.submit_m5_work(submission)

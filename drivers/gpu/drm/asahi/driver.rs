@@ -599,6 +599,12 @@ impl AsahiPlatformDriver {
                 error
             );
         }
+        if let Err(error) = crate::sysfs_exports::register_light(
+            raw_dev,
+            crate::g17::power::LIGHT_EFFORT.as_ptr(),
+        ) {
+            dev_warn!(pdev.as_ref(), "light_effort not registered: {:?}\n", error);
+        }
         Ok(AsahiPlatformDriverData {
             binding,
             _device: reg.device().into(),

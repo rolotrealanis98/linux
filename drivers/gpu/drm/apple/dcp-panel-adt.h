@@ -14,6 +14,8 @@ struct dcp_panel_adt {
 	u32 lmax_product;
 	/* /product target, only when its calibration matrix is also valid */
 	enum dcp_panel_gamut gamut;
+	/* /arm-io/disp0 first-frame-response and -high as stored, big-endian; 0 if absent */
+	u32 first_frame_response, first_frame_response_high;
 	bool found;
 };
 

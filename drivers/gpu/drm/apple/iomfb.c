@@ -1196,6 +1196,14 @@ static void iomfb_set_block_start(struct apple_dcp *dcp, struct iomfb_transactio
 int iomfb_v27_set_block(struct apple_dcp *dcp, u32 block, const void *data, size_t data_size,
 			const void *buf, size_t buf_size, u32 *status)
 {
+	return iomfb_v27_set_block_idx(dcp, block, NULL, 0, data, data_size, buf, buf_size,
+				       status);
+}
+
+int iomfb_v27_set_block_idx(struct apple_dcp *dcp, u32 block, const u64 *indexes,
+			    unsigned int index_count, const void *data, size_t data_size,
+			    const void *buf, size_t buf_size, u32 *status)
+{
 	struct iomfb_set_block_rpc *rpc;
 	size_t mapped = ALIGN(buf_size, SZ_16K);
 	dma_addr_t dva = 0;
@@ -1209,11 +1217,15 @@ int iomfb_v27_set_block(struct apple_dcp *dcp, u32 block, const void *data, size
 	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) || dcp->fw_compat != DCP_FIRMWARE_V_27_0 ||
 	    !dcp->v27_methods || dcp->v27_methods != iomfb_v27_methods("27.2.0"))
 		return -EOPNOTSUPP;
-	if (data_size > sizeof(rpc->req.data) || (buf && !buf_size))
+	if (data_size > sizeof(rpc->req.data) || (buf && !buf_size) ||
+	    index_count > ARRAY_SIZE(rpc->req.indexes))
 		return -EINVAL;
 	rpc = kzalloc_obj(*rpc);
 	if (!rpc)
 		return -ENOMEM;
+	for (unsigned int i = 0; i < index_count; i++)
+		rpc->req.indexes[i] = cpu_to_le64(indexes[i]);
+	rpc->req.index_count = cpu_to_le32(index_count);
 	if (buf) {
 		va = dma_alloc_coherent(dcp->dev, mapped, &dva, GFP_KERNEL);
 		if (!va) {

@@ -5,6 +5,10 @@ CFLAGS_trace.o = -I$(src)
 appledrm-y := apple_drv.o apple_resume.o
 appledrm-y += afk.o dcp.o dcp-fabric.o dcp_backlight.o dptxep.o iomfb.o parser.o systemep.o
 appledrm-y += dcp-hdmi.o
+# EXPERIMENTAL: the pixel compensation tables' two floating-point steps
+appledrm-y += dcp-panelcal-fp.o
+CFLAGS_dcp-panelcal-fp.o += $(CC_FLAGS_FPU)
+CFLAGS_REMOVE_dcp-panelcal-fp.o += $(CC_FLAGS_NO_FPU)
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += audio.o
 appledrm-$(CONFIG_DRM_APPLE_AUDIO) += av.o
 appledrm-y += connector.o dcp-panel-adt.o dcp-display-metadata.o dcp-180hz.o

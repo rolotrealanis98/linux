@@ -1182,6 +1182,15 @@ const FEED_WORK: u64 = 5;
 const GOVERNOR_WORK: u64 = 6;
 /// M5: the completion sweep's timer ([`Shared::queue_sweep`]).
 const SWEEP_WORK: u64 = 7;
+/// M5: the completion sweep runs only while this is nonzero. Off at boot: probe and early
+/// runtime never see it. The driver sets it from `m5_completion_sweep` once the device is
+/// registered, and userspace switches it with the `completion_sweep` sysfs file. An error in
+/// a sweep switches it off again ([`sweep_enabled`]).
+pub(crate) static COMPLETION_SWEEP: AtomicU32 = AtomicU32::new(0);
+/// Whether the M5 completion sweep is switched on ([`COMPLETION_SWEEP`]).
+pub(crate) fn sweep_enabled() -> bool {
+    COMPLETION_SWEEP.load(Ordering::Relaxed) != 0
+}
 /// M5: while work is in flight, an event pass looks this often for commands that finished
 /// without a completion notification.
 const SWEEP_MS: u32 = 4;
@@ -1319,7 +1328,7 @@ impl_has_delayed_work! {
 impl WorkItem<SWEEP_WORK> for Shared {
     type Pointer = Arc<Shared>;
     fn run(this: Arc<Shared>) {
-        if this.sleeping() {
+        if this.sleeping() || !sweep_enabled() {
             return;
         }
         this.sweep_due.store(true, Ordering::Release);
@@ -1540,6 +1549,11 @@ impl Shared {
     /// and by every pass that leaves work in flight; a pending timer is left as it is. Callable
     /// from any context.
     fn queue_sweep(self: &Arc<Self>) {
+        // Off unless switched on after registration; never armed during probe or before the
+        // event worker accepts records.
+        if !sweep_enabled() || !self.submission_enabled {
+            return;
+        }
         let _ = workqueue::system_highpri()
             .enqueue_delayed::<Arc<Self>, SWEEP_WORK>(self.clone(), msecs_to_jiffies(SWEEP_MS));
     }

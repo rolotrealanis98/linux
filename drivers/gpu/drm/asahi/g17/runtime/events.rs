@@ -608,8 +608,17 @@ impl crate::g17::Shared {
         let sweep = self
             .sweep_due
             .swap(false, core::sync::atomic::Ordering::AcqRel);
-        if sweep && firmware.init.is_m5() && !firmware.recovery.pending() {
-            firmware.sweep_completions(deferred)?;
+        if sweep
+            && crate::g17::sweep_enabled()
+            && firmware.init.is_m5()
+            && !firmware.recovery.pending()
+        {
+            // The sweep is an aid: an error in it switches it off and is logged, the pass goes on
+            // as it would have without it.
+            if let Err(error) = firmware.sweep_completions(deferred) {
+                crate::g17::COMPLETION_SWEEP.store(0, core::sync::atomic::Ordering::Relaxed);
+                pr_warn!("G17: completion sweep failed ({:?}); switched off\n", error);
+            }
         }
         drop(state);
         self.observe_renders(masks, deferred)?;

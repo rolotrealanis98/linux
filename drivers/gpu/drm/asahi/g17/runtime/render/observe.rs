@@ -88,14 +88,18 @@ impl crate::g17::Firmware {
             ];
             core::sync::atomic::fence(Ordering::Acquire);
             let fragment = usize::from(qids[1]);
+            let (word, bit) = (fragment / 64, 1u64 << (fragment % 64));
+            if word >= 2 {
+                continue;
+            }
             let mut masks = [0u64; 2];
-            masks[fragment / 64] |= 1u64 << (fragment % 64);
+            masks[word] |= bit;
             // The prefilter the observation applies itself: both stamps cover the front.
             if pair.observation_packet(masks, stamps, state)?.is_none() {
                 continue;
             }
             let entry = self.queues.render.entries[slot].as_mut().ok_or(EIO)?;
-            entry.event_masks[fragment / 64] |= masks[fragment / 64];
+            entry.event_masks[word] |= bit;
             noted += 1;
         }
         Ok(noted)

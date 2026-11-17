@@ -32,6 +32,7 @@
 		/* The loader fills the keyboard layout from the ADT's keyboard node */
 		keyboard = &keyboard;
 		/* the boot loader reserves the SEP firmware and adds its manifests through this alias */
+		sep = &sep;
 		/* The loader finds the boot NOR's NVRAM partition through this alias */
 		nvram = &nvram;
 	};
@@ -534,11 +535,49 @@
  * fabric parents left to the firmware, which genpd votes on and never turns off.
  * The boot loader enables the SEP itself through its alias.
  */
+&sep_mbox {
+	status = "okay";
+};
+
+&ps_sep {
+	status = "okay";
+};
+
 /*
- * The SEP itself, its mailbox and ps_sep stay off, and there is no "sep" alias:
- * this machine's boot loader stops ("sep not found in devtree") when the alias
- * is there, and does not hand the SEP over.
+ * Touch ID (ADT spi2/mesa, macOS 27.3): the J714s's Mesa sensor (sensor-id 0x3356,
+ * mesaType 1) at 8 MHz on chip select 0, powered by NUB GPIO 21 (function-mesa_pwr),
+ * data ready on AP GPIO 138. Same wiring as the J714s.
  */
+&ps_nub_gpio {
+	status = "okay";
+};
+
+&nub_gpio0 {
+	status = "okay";
+};
+
+&ps_spi2 {
+	status = "okay";
+};
+
+&spi2 {
+	clocks = <&clkref>;
+	status = "okay";
+
+	mesa: fingerprint@0 {
+		compatible = "apple,mesa-fingerprint";
+		reg = <0>;
+		spi-max-frequency = <8000000>;
+		spi-cpol;
+		spi-cs-setup-delay-ns = <20>;
+		spi-cs-hold-delay-ns = <20>;
+		enable-gpios = <&nub_gpio0 21 GPIO_ACTIVE_HIGH>;
+		interrupt-parent = <&pinctrl_ap>;
+		interrupts = <138 IRQ_TYPE_EDGE_RISING>;
+		/* Per-device factory data from this Mac's own iBoot system container */
+		firmware-name = "apple/mesacal-j716s.bin", "apple/msrk-j716s.bin";
+	};
+};
 
 &ps_fab8_soc {
 	apple,firmware-owned;

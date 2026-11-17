@@ -74,6 +74,31 @@
 #define PANELCAL_ELVS_BUF	0x4000
 #define PANELCAL_ELVS_MAX	10
 
+/*
+ * PDC is off unless asked for: sent with the panel in its normal mode it crashed the display
+ * firmware's M3 ("pdc_control_oled.c:246") 180 ms after the tables became valid. macOS's loader
+ * takes the panel out of normal mode for the load, which restarts the M3 afterwards.
+ * 1: so bracketed (NormalModeEnable off, the load, on); 2: unbracketed, the crashing way.
+ */
+static int panelcal_pdc;
+module_param(panelcal_pdc, int, 0644);
+MODULE_PARM_DESC(panelcal_pdc, "EXPERIMENTAL: send the PDC tables (0 no, 1 outside normal mode, 2 as is)");
+
+#define PANELCAL_PROP_NORMAL_MODE	124
+
+/* PropRelay's boolean setter (A200): the property's index and the value */
+static int panelcal_set_bool(struct apple_dcp *dcp, u32 prop, bool value)
+{
+	u8 in[8] = {};
+	int ret;
+
+	put_unaligned_le32(prop, in);
+	in[4] = value;
+	ret = iomfb_v27_sleep_call(dcp, "A200", in, sizeof(in), sizeof(__le32));
+	dev_info(dcp->dev, "panel calibration: property %u = %u: %d\n", prop, value, ret);
+	return ret;
+}
+
 struct panelcal_rec {
 	const u8 *body;
 	size_t len;
@@ -461,6 +486,11 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	u8 *cfg, *hdr, *buf;
 	int ret, k;
 
+	const int mode = READ_ONCE(panelcal_pdc);
+	bool bracket = false;
+
+	if (!mode)
+		return -ENOENT;
 	if (!dcp->panelcal_ffr[0] || !dcp->panelcal_ffr[1])
 		return -ENODATA;
 	ret = panelcal_file(dcp, PANELCAL_FW_PDC, &fw, &end);
@@ -592,6 +622,13 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	put_unaligned_le32((u32)pdc->c2576 << 16, cfg + 2576);
 	dev_info(dcp->dev, "panel calibration: PDC config crc %#x, %u + %u LUT groups\n",
 		 crc32_le(~0, cfg, PANELCAL_PDC_CFG) ^ ~0U, pdc->ngroups[0], pdc->ngroups[1]);
+	if (mode == 1) {
+		ret = panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, false);
+		if (ret)
+			goto out;
+		bracket = true;
+		msleep(300);
+	}
 	ret = panelcal_send(dcp, PANELCAL_BLOCK_PDC_CONFIG, "PDC config, version", dver, cfg,
 			    PANELCAL_PDC_CFG, NULL, 0);
 	if (ret)
@@ -669,6 +706,8 @@ static int dcp_panelcal_pdc(struct apple_dcp *dcp)
 	dev_info(dcp->dev, "panel calibration: %u of %u PDC LUTs accepted, crc of all %#x, last result %d\n",
 		 sent, pdc->ngroups[0], crc ^ ~0U, ret);
 out:
+	if (bracket)
+		panelcal_set_bool(dcp, PANELCAL_PROP_NORMAL_MODE, true);
 	kvfree(buf);
 	kfree(hdr);
 	kfree(cfg);

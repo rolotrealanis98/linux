@@ -283,23 +283,41 @@ impl InitData {
                 calibration.as_ref().is_ok_and(|words| words.as_slice() == expected)
             }
         };
-        // An M5 Pro board with no controller configuration of its own (J716s) can take the
-        // M5 Pro's (J714's, which upstream applies to every J714-board part): without one the
-        // firmware keeps its default budget and runs ALU work at about a fifth of macOS's speed.
-        // Off unless m5_controller_defaults asks for it; the leakage inputs are J714's reference
-        // part's.
-        let borrowed: Option<fn(&mut [u8]) -> core::result::Result<(), m::InitdataError>> =
-            if board.is_m5_pro_without_controller()
-                && crate::module_parameters::m5_controller_defaults.value() == 1
-            {
-                pr_info!("G17: M5 Pro controller configuration on a board without one (m5_controller_defaults)\n");
-                Some(m::encode_m5_policy_controller_defaults)
-            } else {
-                None
-            };
-        let controller_defaults = board.controller_defaults.filter(|_| calibrated).or(borrowed);
-        if let Some(defaults) = controller_defaults {
-            defaults(self.object_mut(self.bundle)?.bytes_mut()).map_err(|_| EINVAL)?;
+        // An M5 Pro board with no controller configuration of its own (J716s) can take its own:
+        // the M5 Pro's, with this part's leakage from the boot loader's calibration words.
+        // Without one the firmware keeps its default budget and runs ALU work at about a fifth
+        // of macOS's speed. Off unless m5_controller_defaults asks for it; without valid words
+        // nothing changes.
+        let part_leakage = if board.is_m5_pro_without_controller()
+            && crate::module_parameters::m5_controller_defaults.value() == 1
+        {
+            let node = dev.as_ref().as_ref().of_node().ok_or(EIO)?;
+            let words: Result<KVec<u32>> =
+                node.get_property(c_str!("apple,leakage-calibration-words"));
+            let leakage = words.ok()
+                .and_then(|words| <[u32; 3]>::try_from(words.as_slice()).ok())
+                .and_then(|words| m::M5Leakage::decode_two_cluster(&words));
+            match leakage {
+                Some(leakage) => pr_info!(
+                    "G17: J716s controller configuration, this part's leakage: clusters {}/2 {}/2, SRAM {}/2, AFR {}/2 (m5_controller_defaults)\n",
+                    leakage.cluster_halves[0], leakage.cluster_halves[1], leakage.sram_halves,
+                    leakage.afr_halves),
+                None => pr_warn!(
+                    "G17: m5_controller_defaults: no valid leakage calibration words; the firmware's default budget\n"),
+            }
+            leakage
+        } else {
+            None
+        };
+        let controller_defaults = board.controller_defaults.filter(|_| calibrated);
+        let configured = controller_defaults.is_some() || part_leakage.is_some();
+        if configured {
+            let bundle = self.object_mut(self.bundle)?.bytes_mut();
+            match (controller_defaults, part_leakage.as_ref()) {
+                (Some(defaults), _) => defaults(bundle),
+                (None, Some(leakage)) => m::encode_m5_policy_controller_defaults_j716s(bundle, leakage),
+                (None, None) => Ok(()),
+            }.map_err(|_| EINVAL)?;
             let maximum = self.object(self.bundle)?.word(shared.policy + m::M5_POLICY_MAXIMUM_POWER)?
                 .load(Ordering::Relaxed);
             m::set_m5_region_maximum_power(self.object_mut(self.region_c)?.bytes_mut(), maximum)
@@ -317,7 +335,7 @@ impl InitData {
             m::relayout_m5_policy(
                 policy,
                 board,
-                controller_defaults.is_some(),
+                configured,
                 &mut self.object_mut(self.bundle)?.bytes_mut()[shared.policy..policy_end],
             )
             .map_err(|_| EINVAL)?;

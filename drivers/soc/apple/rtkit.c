@@ -563,10 +563,12 @@ static int apple_rtkit_alloc_shmem(struct apple_rtkit *rtk, u8 ep,
 	/*
 	 * K116s (firmware 27.2): ANS asks for its syslog buffer (ep 2, 0x4000 bytes) about 2.4 s
 	 * into the wake, where the J714s's (27.0) never asks. A first buffer replaces none, so the
-	 * hold has nothing to protect: the log endpoints' first request is served.
+	 * hold has nothing to protect: the log endpoints' first request is served. The J716s
+	 * (27.3) is taken with the K116s: its ANS is the same generation, past 27.0.
 	 */
 	if (READ_ONCE(rtk->ans_hold)) {
-		if (!of_machine_is_compatible("apple,k116s") ||
+		if ((!of_machine_is_compatible("apple,k116s") &&
+		     !of_machine_is_compatible("apple,j716s")) ||
 		    (ep != APPLE_RTKIT_EP_SYSLOG && ep != APPLE_RTKIT_EP_OSLOG &&
 		     ep != APPLE_RTKIT_EP_CRASHLOG))
 			return apple_rtkit_ans_fail(rtk, -EBUSY);

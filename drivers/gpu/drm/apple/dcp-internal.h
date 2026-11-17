@@ -768,9 +768,15 @@ struct apple_dcp {
 	/*
 	 * The sleep's endpoints are tracked in sleep_v27_ep and its session exchange is answered:
 	 * the J714s (v27_j714s), and the J716s on 27.3 booted with appledrm.j716s_deep_sleep=1.
-	 * Its panel's AV and DP services stay the J714s's own.
+	 * Its panel's AV and DP services are v27_panel_av's.
 	 */
 	bool v27_sleep_eps;
+	/*
+	 * The panel's AV and DP services (epic/panelavep.c) are started: the J714s (v27_j714s),
+	 * and the J716s's internal processor booted with appledrm.j716s_deep_sleep=1 and
+	 * appledrm.j716s_panel_av=1, as the K116s starts them for its deep sleep's wake.
+	 */
+	bool v27_panel_av;
 	/*
 	 * J716s on 27.3: what DPMS off left of the internal display (appledrm.j716s_sleep): 0 on,
 	 * 1 off on the running firmware, 2 the firmware stopped and its domain powered down,

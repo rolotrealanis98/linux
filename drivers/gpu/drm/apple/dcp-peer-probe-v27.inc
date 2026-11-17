@@ -94,5 +94,6 @@ static const struct attribute_group dcp_peer_probe_group = {
 };
 static const struct attribute_group *dcp_peer_probe_groups[] = {
 	&dcp_peer_probe_group,
+	&dcp_panelcal_group,
 	NULL,
 };

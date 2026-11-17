@@ -1130,6 +1130,129 @@ static int iomfb_v27_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
 	return ret;
 }
 
+/*
+ * EXPERIMENTAL (K116s, firmware 27.2): set_block_dcp, the call macOS's display loader hands the
+ * panel's compensation tables over with (A491 there; A441 in 27.0's numbering by the +50 rule,
+ * not verified on 27.0). @data is the block's inline part: a 20-byte header for a block with a
+ * buffer, or the whole struct. @buf is copied into a buffer the firmware can address for the
+ * call, as macOS's kernel does; the firmware copies out of it before it answers.
+ */
+struct dcp_set_block_req {
+	__le64 client;
+	__le32 block;
+	__le32 arg;
+	__le64 indexes[8];
+	__le32 index_count;
+	u8 data[0x1000];
+	__le64 data_size;
+	__le64 buf_dva;
+	__le32 buf_size;
+	u8 buf_mapped;
+	u8 pad[3];
+} __packed;
+static_assert(sizeof(struct dcp_set_block_req) == 0x106c);
+
+struct iomfb_set_block_rpc {
+	struct iomfb_transaction transaction;
+	struct kref ref;
+	struct completion done;
+	struct dcp_method_entry method;
+	u32 status;
+	bool answered;
+	struct dcp_set_block_req req;
+};
+
+static void iomfb_set_block_free(struct kref *ref)
+{
+	kfree(container_of(ref, struct iomfb_set_block_rpc, ref));
+}
+
+static void iomfb_set_block_release(struct iomfb_transaction *transaction)
+{
+	struct iomfb_set_block_rpc *rpc = container_of(transaction, struct iomfb_set_block_rpc,
+						       transaction);
+
+	kref_put(&rpc->ref, iomfb_set_block_free);
+}
+
+static void iomfb_set_block_done(struct apple_dcp *dcp, void *out, void *cookie)
+{
+	struct iomfb_set_block_rpc *rpc = cookie;
+
+	rpc->status = out ? get_unaligned_le32(out) : ~0U;
+	rpc->answered = !!out;
+	complete(&rpc->done);
+}
+
+static void iomfb_set_block_start(struct apple_dcp *dcp, struct iomfb_transaction *transaction)
+{
+	struct iomfb_set_block_rpc *rpc = container_of(transaction, struct iomfb_set_block_rpc,
+						       transaction);
+
+	dcp_push(dcp, false, &rpc->method, sizeof(rpc->req), sizeof(__le32), &rpc->req,
+		 iomfb_set_block_done, rpc);
+}
+
+int iomfb_v27_set_block(struct apple_dcp *dcp, u32 block, const void *data, size_t data_size,
+			const void *buf, size_t buf_size, u32 *status)
+{
+	struct iomfb_set_block_rpc *rpc;
+	size_t mapped = ALIGN(buf_size, SZ_16K);
+	dma_addr_t dva = 0;
+	void *va = NULL;
+	int ret;
+
+	/*
+	 * Only where set_block_dcp's tag is known: the 27.2 table (A491). On 27.3 (J716s) it
+	 * has not been read from the firmware; this tree has no 27.2 translation of 27.0 tags.
+	 */
+	if (!IS_ENABLED(CONFIG_APPLE_SOC_SLEEP) || dcp->fw_compat != DCP_FIRMWARE_V_27_0 ||
+	    !dcp->v27_methods || dcp->v27_methods != iomfb_v27_methods("27.2.0"))
+		return -EOPNOTSUPP;
+	if (data_size > sizeof(rpc->req.data) || (buf && !buf_size))
+		return -EINVAL;
+	rpc = kzalloc_obj(*rpc);
+	if (!rpc)
+		return -ENOMEM;
+	if (buf) {
+		va = dma_alloc_coherent(dcp->dev, mapped, &dva, GFP_KERNEL);
+		if (!va) {
+			kfree(rpc);
+			return -ENOMEM;
+		}
+		memset(va, 0, mapped);
+		memcpy(va, buf, buf_size);
+		rpc->req.buf_dva = cpu_to_le64(dva);
+		rpc->req.buf_size = cpu_to_le32(buf_size);
+		rpc->req.buf_mapped = 1;
+	}
+	rpc->req.block = cpu_to_le32(block);
+	memcpy(rpc->req.data, data, data_size);
+	rpc->req.data_size = cpu_to_le64(data_size);
+	kref_init(&rpc->ref);
+	init_completion(&rpc->done);
+	rpc->status = ~0U;
+	rpc->transaction.start = iomfb_set_block_start;
+	rpc->transaction.release = iomfb_set_block_release;
+	rpc->method = (struct dcp_method_entry) { .name = "v27_set_block" };
+	memcpy(rpc->method.tag, "A491", 4);
+	kref_get(&rpc->ref);
+	ret = iomfb_queue(dcp, &rpc->transaction);
+	if (ret)
+		iomfb_set_block_release(&rpc->transaction);
+	else if (!wait_for_completion_timeout(&rpc->done, msecs_to_jiffies(2000)))
+		ret = -ETIMEDOUT;
+	else if (!rpc->answered)
+		ret = -EREMOTEIO;
+	if (status)
+		*status = rpc->status;
+	/* Unanswered, the firmware may still read the buffer: it is leaked, not freed under it. */
+	if (va && ret != -ETIMEDOUT)
+		dma_free_coherent(dcp->dev, mapped, va, dva);
+	kref_put(&rpc->ref, iomfb_set_block_free);
+	return ret;
+}
+
 struct iomfb_crc_transaction {
 	struct iomfb_transaction transaction;
 	u32 swap_id;

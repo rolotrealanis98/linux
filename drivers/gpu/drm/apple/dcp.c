@@ -557,6 +557,31 @@ bool dcp_t6041_ext_enabled(void)
 #include "dcp-peer-v26_6.inc"
 /* The firmware 27 pair shares dcp_peer_lock and dcp_peer_forget() above. */
 #include "dcp-peer-v27.inc"
+/* EXPERIMENTAL: "echo 1 > panel_calibration" sends the panel's compensation tables (dcp-panelcal.inc) */
+static int dcp_panelcal_load(struct apple_dcp *dcp);
+
+static ssize_t panel_calibration_store(struct device *dev, struct device_attribute *attr,
+				       const char *buf, size_t count)
+{
+	struct apple_dcp *dcp = dev_get_drvdata(dev);
+	int ret;
+
+	if (!dcp)
+		return -ENODEV;
+	ret = dcp_panelcal_load(dcp);
+	return ret ?: count;
+}
+static DEVICE_ATTR_WO(panel_calibration);
+
+static struct attribute *dcp_panelcal_attrs[] = {
+	&dev_attr_panel_calibration.attr,
+	NULL,
+};
+
+static const struct attribute_group dcp_panelcal_group = {
+	.attrs = dcp_panelcal_attrs,
+};
+
 #include "dcp-peer-probe-v27.inc"
 
 /*
@@ -8975,6 +9000,7 @@ bool dcp_s2r_firmware_stopped(struct platform_device *pdev)
 }
 
 #include "dcp-v27-sleep.inc"
+#include "dcp-panelcal.inc"
 
 static int dcp_platform_suspend(struct device *dev)
 {

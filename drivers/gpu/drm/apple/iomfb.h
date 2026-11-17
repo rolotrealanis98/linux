@@ -273,6 +273,8 @@ int iomfb_v27_sleep_plain(struct apple_dcp *dcp, bool on);
 int iomfb_v27_sleep_call(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
 			 const void *in, u32 in_len, u32 out_len);
 int iomfb_v27_sleep_a115(struct apple_dcp *dcp, bool awake);
+int iomfb_v27_set_block(struct apple_dcp *dcp, u32 block, const void *data, size_t data_size,
+			const void *buf, size_t buf_size, u32 *status);
 int iomfb_v27_sleep_call_a442(struct apple_dcp *dcp, enum iomfb_v27_sleep_call call,
 			      u32 out_len, u8 key);
 /* The display stage's DT arguments: A414's eight, then A487's four. */

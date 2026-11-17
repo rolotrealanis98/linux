@@ -110,9 +110,9 @@ enum apple_clpc_rail {
  *	sharing this CLPC without it get no low-power profile. NULL for any
  * @low_power_mw: package power (the SMC's PHPC key) the low-power profile
  *	holds the CPU clusters to; 0 for none
- * @high_power_machine: the machine compatible on which the performance
+ * @high_power_machines: the machine compatibles on which the performance
  *	profile tells the SMC that macOS's High Power mode is on (the zETM
- *	record below); NULL for none
+ *	record below), NULL-terminated; NULL for none
  */
 struct apple_clpc_hw {
 	unsigned int rail[APPLE_CLPC_RAILS];
@@ -133,7 +133,7 @@ struct apple_clpc_hw {
 	unsigned int low_power_khz;
 	const char *low_power_machine;
 	unsigned int low_power_mw;
-	const char *high_power_machine;
+	const char *const *high_power_machines;
 };
 
 struct apple_clpc_cluster {
@@ -1508,8 +1508,8 @@ static int apple_clpc_probe(struct platform_device *pdev)
 
 		/* The SMC is optional: without it the low-power profile has only its ceiling. */
 		clpc->smc_np = of_parse_phandle(dev->of_node, "apple,smc", 0);
-		clpc->high_power = clpc->smc_np && clpc->hw->high_power_machine &&
-				   of_machine_is_compatible(clpc->hw->high_power_machine);
+		clpc->high_power = clpc->smc_np && clpc->hw->high_power_machines &&
+				   of_machine_compatible_match(clpc->hw->high_power_machines);
 		if (!clpc->policy_nb_added) {
 			clpc->policy_nb.notifier_call = apple_clpc_policy_notify;
 			clpc->policy_nb_added = !cpufreq_register_notifier(&clpc->policy_nb,
@@ -2005,6 +2005,17 @@ static const struct apple_clpc_hw apple_clpc_hw_t8152 = {
 };
 
 /*
+ * High Power mode's record, as macOS 27.0 writes it on the 14-inch M5 Pro. The
+ * 16-inch (J716s) offers the same mode and its SMC has the same 120-byte zETM
+ * key; thermalmonitord is the same program on both.
+ */
+static const char *const apple_clpc_t6050_high_power[] = {
+	"apple,j714s",
+	"apple,j716s",
+	NULL
+};
+
+/*
  * T6050 (M5 Pro/Max): DCS states 0-6 on rail 0, fabric states 0-3 on rail 1.
  * The boot loader enables no agent on either rail, so without this floor
  * the DRAM controller and the fabric stay at state 0: CPU memcpy caps at
@@ -2043,8 +2054,7 @@ static const struct apple_clpc_hw apple_clpc_hw_t6050 = {
 	.idle_on_time = true,
 	.low_power_khz = 2808000,
 	.low_power_mw = 15000,
-	/* High Power mode's record, as macOS 27.0 writes it on the 14-inch M5 Pro */
-	.high_power_machine = "apple,j714s",
+	.high_power_machines = apple_clpc_t6050_high_power,
 };
 
 static const struct of_device_id apple_clpc_of_match[] = {

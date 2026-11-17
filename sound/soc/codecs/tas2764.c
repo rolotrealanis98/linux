@@ -401,6 +401,17 @@ static int tas2764_codec_suspend(struct snd_soc_component *component)
 }
 
 /*
+ * The check below reads every SDZ group amp at every resume that did not come
+ * through firmware, s2idle included, and restores a group it finds reset as
+ * from power-on. Off by default, so an s2idle resume stays what it was; on,
+ * it covers an s2idle wake after a deep sleep that failed half way.
+ */
+static bool resume_check_lost;
+module_param(resume_check_lost, bool, 0644);
+MODULE_PARM_DESC(resume_check_lost,
+		 "At a resume not via firmware, read each SDZ group amp and restore it as from power-on if it was reset");
+
+/*
  * Whether the amp came back from a power-on reset, read from the amp itself:
  * PWR_CTRL resets to 0x1a with BOP_SRC clear, and the probe sets BOP_SRC on
  * every SN012776. A failed read counts as lost too. Bypasses the cache, which
@@ -411,7 +422,7 @@ static bool tas2764_lost_state(struct tas2764_priv *tas2764)
 	unsigned int val;
 	int ret;
 
-	if (tas2764->devid != DEVID_SN012776)
+	if (!READ_ONCE(resume_check_lost) || tas2764->devid != DEVID_SN012776)
 		return false;
 	regcache_cache_bypass(tas2764->regmap, true);
 	ret = regmap_read(tas2764->regmap, TAS2764_PWR_CTRL, &val);

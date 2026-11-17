@@ -59,6 +59,7 @@ pub(crate) const CONFIG: Config = Config {
     fabric_bridge: true,
     sleep_restart: true,
     firmware: crate::g17::fw::variant::Firmware::Fixed(&crate::g17::fw::variant::V26A428),
+    light_effort: None,
     // The layouts the A18 Pro has always run with.
     core_layout: crate::g17::CoreLayout {
         cores: None,

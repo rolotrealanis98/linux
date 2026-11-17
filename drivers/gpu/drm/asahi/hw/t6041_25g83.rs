@@ -48,6 +48,7 @@ pub(super) const CONFIG: Config = Config {
     region_c: Some(&REGION_C),
     chip: Some(&CHIP),
     firmware: fw::variant::Firmware::Identified(&[t6041::BUILD_25G83]),
+    light_effort: None,
     core_layout: CoreLayout {
         cores: Some((4, 32)),
         alternate_core_masks: None,

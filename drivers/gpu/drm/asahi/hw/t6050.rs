@@ -71,6 +71,16 @@ pub(crate) const CONFIG: Config = Config {
         variant: &crate::g17::fw::variant::V26A428_M5,
         config: None,
     }]),
+    // Quiet work may run at a lower firmware effort, off unless the `light_effort` switch
+    // (`m5_light_effort`) sets one. The busy share is the union of the GPU's stages at whatever
+    // clock it runs: a window below 250 permille with no stage of 3 ms is quiet, and 700
+    // permille or a stage of 7 ms goes back to full. Not yet measured for power.
+    light_effort: Some(crate::g17::power::LightEffort {
+        enter_permille: 250,
+        exit_permille: 700,
+        job_enter_us: 3000,
+        job_exit_us: 7000,
+    }),
     // Two clusters of ten cores. The buffers are sized for every core slot of the board, so the
     // board's cluster and slot counts admit the GPU, whichever cores are fused off.
     core_layout: CoreLayout {
@@ -258,6 +268,7 @@ pub(crate) const CONFIG_MAX: Config = Config {
         variant: &crate::g17::fw::variant::V26A428_M5,
         config: None,
     }]),
+    light_effort: None,
     // Four clusters of ten cores. The buffers are sized for every core slot of the board, so the
     // board's cluster and slot counts admit the GPU, whichever cores are fused off.
     core_layout: CoreLayout {
@@ -346,6 +357,7 @@ pub(crate) const CONFIG_ULTRA: Config = Config {
     // (`fw::m5::render_registers`), so the deflake layout is the M5 Pro's. As on the M5 Pro, the
     // buffers are sized for all 80 core slots and the board admits the GPU by clusters and slots:
     // parts with fused-off cores (64 enabled) take the same layout.
+    light_effort: None,
     core_layout: CoreLayout {
         cores: None,
         alternate_core_masks: None,

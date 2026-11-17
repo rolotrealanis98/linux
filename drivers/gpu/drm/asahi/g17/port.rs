@@ -529,7 +529,9 @@ impl Port {
     pub(super) fn note_submission(&self) -> bool {
         self.submissions.fetch_add(1, Ordering::SeqCst);
         self.note_gpu_activity();
+        // Take the slow path when the governor wants a different effort.
         self.effort_full.load(Ordering::SeqCst)
+            && super::power::submission_effort() == super::power::FULL_EFFORT
     }
 
     pub(super) fn submissions(&self) -> u64 {
@@ -537,8 +539,20 @@ impl Port {
     }
 
     pub(super) fn set_effort_full(&self, full: bool) {
-        self.effort_full.store(full, Ordering::SeqCst);
-        self.demand.set_active(full);
+        self.set_effort(if full { super::power::FULL_EFFORT } else { 0 });
+    }
+
+    /// Steps the busy-share report (`power::Demand::report_busy`) for a publisher that does
+    /// not note GPU activity here.
+    pub(super) fn report_busy(&self) {
+        self.demand.report_busy(super::now_ns());
+    }
+
+    /// The requested effort: full or not for the lockless fast path, and work in flight for
+    /// the performance controller at any nonzero (full or light) effort.
+    pub(super) fn set_effort(&self, effort: u32) {
+        self.effort_full.store(effort == super::power::FULL_EFFORT, Ordering::SeqCst);
+        self.demand.set_active(effort != 0);
     }
 
     /// The next statistics drain and reader discard what the decoder holds.
@@ -561,9 +575,10 @@ impl Port {
         {
             self.statistics_epoch.fetch_add(1, Ordering::Release);
         }
-        self.last_submission_ns
-            .store(super::now_ns(), Ordering::Relaxed);
+        let now = super::now_ns();
+        self.last_submission_ns.store(now, Ordering::Relaxed);
         self.demand.set_active(true);
+        self.demand.report_busy(now);
     }
 
     pub(super) fn write_power(&self, f: &mut kernel::fmt::Formatter<'_>) -> kernel::fmt::Result {

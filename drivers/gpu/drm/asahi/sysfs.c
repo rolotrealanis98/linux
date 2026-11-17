@@ -384,6 +384,45 @@ int asahi_sysfs_register_sweep(struct device *dev, u32 *word)
 }
 EXPORT_SYMBOL_GPL(asahi_sysfs_register_sweep);
 
+/*
+ * G17 (M5 Pro): firmware effort for quiet GPU work, of 65536 (power::LIGHT_EFFORT). 0 runs
+ * every submission a thread waits for at full effort, as before; 1-65535 runs such work at that
+ * effort while the GPU's busy share stays low. Set at boot from m5_light_effort.
+ */
+static u32 *asahi_light_word;
+
+static ssize_t light_effort_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", READ_ONCE(*asahi_light_word));
+}
+
+static ssize_t light_effort_store(struct device *dev, struct device_attribute *attr,
+				  const char *buf, size_t count)
+{
+	u32 effort;
+
+	if (kstrtou32(buf, 0, &effort) || effort > 65535)
+		return -EINVAL;
+	WRITE_ONCE(*asahi_light_word, effort);
+	return count;
+}
+
+static DEVICE_ATTR_RW(light_effort);
+
+int asahi_sysfs_register_light(struct device *dev, u32 *word)
+{
+	int ret;
+
+	if (!dev || !word)
+		return -ENODEV;
+	asahi_light_word = word;
+	ret = device_create_file(dev, &dev_attr_light_effort);
+	if (ret)
+		asahi_light_word = NULL;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(asahi_sysfs_register_light);
+
 void asahi_sysfs_unregister(struct device *dev, void *handle)
 {
 	struct asahi_stats_attribute *stats = handle;
@@ -404,6 +443,10 @@ void asahi_sysfs_unregister(struct device *dev, void *handle)
 	if (asahi_sweep_word) {
 		device_remove_file(dev, &dev_attr_completion_sweep);
 		asahi_sweep_word = NULL;
+	}
+	if (asahi_light_word) {
+		device_remove_file(dev, &dev_attr_light_effort);
+		asahi_light_word = NULL;
 	}
 	kfree(stats);
 }

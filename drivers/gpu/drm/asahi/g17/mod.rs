@@ -254,6 +254,9 @@ pub(crate) struct Config {
     pub(crate) gpu_generation: hw::GpuGen,
     /// The firmware builds this SoC runs.
     pub(crate) firmware: fw::variant::Firmware,
+    /// Thresholds for running quiet GPU work at a lower firmware effort (the `light_effort`
+    /// switch); `None` runs every submission at full effort.
+    pub(crate) light_effort: Option<power::LightEffort>,
     /// Layouts of the command buffers that follow the GPU's core layout.
     pub(crate) core_layout: CoreLayout,
 }
@@ -954,7 +957,7 @@ impl Firmware {
         self.primary.state.shared.note_gpu_activity();
         self.effort.submit();
         self.effort.note_waiters(now_ns(), fence::waiters());
-        self.apply_effort(power::FULL_EFFORT)
+        self.apply_effort(power::submission_effort())
     }
 
     /// One governor step with the hotspot temperature reading; returns whether to run again and
@@ -1011,7 +1014,7 @@ impl Firmware {
         // The performance-controller demand follows the requested effort; the firmware is
         // given, and the state records, the M5 value (InitData::submission_effort).
         let published = init.submission_effort(effort, state.waited());
-        port.set_effort_full(effort == power::FULL_EFFORT);
+        port.set_effort(effort);
         if state.applied() == published {
             // M5 maps region C read-only to the firmware: once confirmed, the word holds
             // `applied` without reading it back.
@@ -1053,7 +1056,7 @@ impl Firmware {
         }
         // A waiter that began or ended since the last note moves the effort while work streams.
         if self.effort.streaming() && self.effort.note_waiters(now_ns, fence::waiters()) {
-            self.apply_effort(power::FULL_EFFORT)?;
+            self.apply_effort(power::submission_effort())?;
         }
         let effort = match self.effort.idle(now_ns, in_flight || submitted) {
             power::IdleAction::None => None,
@@ -1670,6 +1673,10 @@ impl Gpu {
             Self::firmware_variant(dev, &cfg.firmware, (id.num_clusters, active_cores))?;
         // A build with its own configuration of the SoC runs with that one.
         let cfg = build_cfg.unwrap_or(cfg);
+        power::configure_light(
+            cfg.light_effort.as_ref(),
+            crate::module_parameters::m5_light_effort.value(),
+        );
         if let Some(calibration) = calibration {
             calibration.check_cores(&id.core_masks)?;
             calibration.check_opps(&initdata::InitData::opps(dev, cfg.opps, id.num_clusters)?)?;

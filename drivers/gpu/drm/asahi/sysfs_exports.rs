@@ -27,6 +27,7 @@ extern "C" {
 extern "C" {
     fn asahi_sysfs_register_idle(dev: *mut c_void, word: *mut u32) -> c_int;
     fn asahi_sysfs_register_sweep(dev: *mut c_void, word: *mut u32) -> c_int;
+    fn asahi_sysfs_register_light(dev: *mut c_void, word: *mut u32) -> c_int;
 }
 
 /// Export the M5 completion sweep switch as the read-write `completion_sweep` (0/1).
@@ -37,6 +38,21 @@ pub(crate) fn register_sweep(
     // SAFETY: `word` is a static atomic that outlives the attribute; the C side reads and writes
     // it with READ_ONCE/WRITE_ONCE.
     let ret = unsafe { asahi_sysfs_register_sweep(dev.cast(), word) };
+    if ret < 0 {
+        Err(kernel::error::Error::from_errno(ret))
+    } else {
+        Ok(())
+    }
+}
+
+/// Export the G17 light effort as the read-write `light_effort` (0..65535).
+pub(crate) fn register_light(
+    dev: *mut kernel::bindings::device,
+    word: *mut u32,
+) -> kernel::error::Result {
+    // SAFETY: `word` is a static atomic that outlives the attribute; the C side reads and writes
+    // it with READ_ONCE/WRITE_ONCE.
+    let ret = unsafe { asahi_sysfs_register_light(dev.cast(), word) };
     if ret < 0 {
         Err(kernel::error::Error::from_errno(ret))
     } else {

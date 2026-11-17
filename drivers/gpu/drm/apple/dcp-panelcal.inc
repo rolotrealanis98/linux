@@ -106,7 +106,13 @@ static int panelcal_set_bool(struct apple_dcp *dcp, u32 prop, bool value)
 
 	put_unaligned_le32(prop, in);
 	in[4] = value;
-	ret = iomfb_v27_sleep_call(dcp, "A200", in, sizeof(in), sizeof(__le32));
+	/*
+	 * This tree sends the firmware 27 calls by role, from a table per build that is known
+	 * for the J714s (27.0) and the J716s (27.3) only, and PropRelay's setter is in neither:
+	 * A200 is the K116s's (27.2) tag, not read from the 27.3 firmware. Refused until it is.
+	 */
+	(void)in;
+	ret = -EOPNOTSUPP;
 	dev_info(dcp->dev, "panel calibration: property %u = %u: %d\n", prop, value, ret);
 	return ret;
 }

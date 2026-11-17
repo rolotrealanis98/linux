@@ -182,6 +182,15 @@ static int dcp_adt_node(struct dcp_adt_cursor *c, struct dcp_panel_adt *panel,
 			panel->first_frame_response = get_unaligned_be32(prop + 36);
 		else if (disp && !strcmp(name, "first-frame-response-high") && size == 4)
 			panel->first_frame_response_high = get_unaligned_be32(prop + 36);
+		else if (disp && size == 4 && !strncmp(name, "llc-", 4)) {
+			int c = !strcmp(name, "llc-red") ? 0 : !strcmp(name, "llc-green") ? 1 :
+				!strcmp(name, "llc-blue") ? 2 : -1;
+
+			if (c >= 0) {
+				panel->llc[c] = get_unaligned_be32(prop + 36);
+				panel->llc_found |= BIT(c);
+			}
+		}
 		c->pos += 36 + ALIGN((size_t)size, 4);
 	}
 	if (product)

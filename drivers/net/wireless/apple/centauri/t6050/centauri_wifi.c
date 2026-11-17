@@ -7,6 +7,7 @@
 #include <linux/iopoll.h>
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
+#include <linux/seq_file.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <net/cfg80211.h>
@@ -93,7 +94,19 @@ struct centauri_t6050_wifi {
 	/* The firmware's own reports, read at bring-up (system commands 19 and 8). */
 	u8 hw_channels[REPLY_SIZE], system_caps[REPLY_SIZE];
 	struct debugfs_blob_wrapper hw_channels_blob, system_caps_blob;
+	/* The last interface status (system command 20), and what it says. */
 	u8 link_status[REPLY_SIZE];
+	struct debugfs_blob_wrapper link_status_blob;
+	struct link_info {
+		bool valid;
+		u8 phy_mode;
+		struct link_channel {
+			u8 number, band, width;
+		} channel;
+		u8 mlo_links;
+		struct link_channel mlo_channel[3];
+	} link;
+	bool link_logged;
 	/* The ESS whose 6 GHz BSSes are not reported: see join_avoid_6ghz(). */
 	bool avoid_valid;
 	u8 avoid_ssid[IEEE80211_MAX_SSID_LEN];
@@ -542,24 +555,128 @@ static void drain_data_tx(struct centauri_t6050_wifi *wifi)
 		netif_wake_queue(wifi->netdev);
 }
 
-/* The interface status reply: 8 fixed bytes, then TLVs. */
-static bool link_signal_read(const u8 *packet, size_t size, s8 *signal)
+/*
+ * The interface status (system command 20, AciGetInterfaceStatus) is a list
+ * of TLVs from byte 8 on. As macOS 27.3 reads it (WLANACIAdapter,
+ * ACIConnectionAdapter::getExtendedBssInfo, getChannel and getMloInfo):
+ *
+ * TLV 268, at least 115 bytes: the link. Byte 1 is the signal in dBm, bytes
+ * 16-18 the channel (AciChannelData: the primary channel number, the band in
+ * bits 0-1 of the second byte, then the AciBwPrimaryChannel* code of the
+ * width), and byte 77 the PHY mode: 1 to 5 for 802.11a/g, n, ac, ax and be
+ * (mapWtePhyModeToApple turns them into APPLE80211_MODE_11G ... _11BE).
+ *
+ * TLV 377, at least 64 bytes, while associated to an AP MLD: the number of
+ * links in byte 0 (macOS reads at most 3), two MLD addresses in bytes 1-12,
+ * then 17 bytes per link: two link addresses, one byte this driver does not
+ * read, and the link's channel (AciChannelData) at offset 13.
+ */
+#define STATUS_LINK 268
+#define STATUS_LINK_SIZE 115
+#define STATUS_MLO 377
+#define STATUS_MLO_SIZE 64
+
+static void link_channel_read(const u8 *data, struct link_channel *channel)
 {
+	channel->number = data[0];
+	channel->band = data[1] & 3;
+	channel->width = data[2];
+}
+
+/* The width of an AciBwPrimaryChannel* code, in MHz; 0 if unknown. */
+static unsigned int link_width_mhz(u8 code)
+{
+	if (code == 0)
+		return 20;
+	if (code <= 2)
+		return 40;
+	if (code <= 6)
+		return 80;
+	if (code <= 14)
+		return 160;
+	if (code <= 30)
+		return 320;
+	return 0;
+}
+
+static const char *const band_names[] = { "2.4 GHz", "5 GHz", "6 GHz", "60 GHz" };
+
+static const char *link_phy_name(u8 mode)
+{
+	static const char *const names[] = {
+		"802.11a/g", "802.11n (HT)", "802.11ac (VHT)", "802.11ax (HE)",
+		"802.11be (EHT)",
+	};
+
+	return mode >= 1 && mode <= ARRAY_SIZE(names) ? names[mode - 1] :
+							"unknown";
+}
+
+static bool link_status_read(const u8 *packet, size_t size, s8 *signal,
+			     struct link_info *info)
+{
+	bool signal_valid = false;
 	size_t pos = 8;
 
+	memset(info, 0, sizeof(*info));
 	while (pos <= size && size - pos >= 4) {
 		u16 tag = get_unaligned_le16(packet + pos);
 		u16 length = get_unaligned_le16(packet + pos + 2);
+		const u8 *value = packet + pos + 4;
 
 		if (length > size - pos - 4)
-			return false;
-		if (tag == 268 && length >= 115) {
-			*signal = (s8)packet[pos + 5];
-			return *signal != 0;
+			break;
+		if (tag == STATUS_LINK && length >= STATUS_LINK_SIZE) {
+			*signal = (s8)value[1];
+			signal_valid = *signal != 0;
+			link_channel_read(value + 16, &info->channel);
+			info->phy_mode = value[77];
+			info->valid = true;
+		} else if (tag == STATUS_MLO && length >= STATUS_MLO_SIZE) {
+			unsigned int i;
+
+			info->mlo_links = min_t(u8, value[0],
+						ARRAY_SIZE(info->mlo_channel));
+			for (i = 0; i < info->mlo_links; i++)
+				link_channel_read(value + 13 + 17 * i + 13,
+						  &info->mlo_channel[i]);
 		}
 		pos += 4 + length;
 	}
-	return false;
+	return signal_valid;
+}
+
+static int link_channel_print(char *buf, size_t size,
+			      const struct link_channel *channel)
+{
+	return scnprintf(buf, size, "%s channel %u, %u MHz",
+			 band_names[channel->band], channel->number,
+			 link_width_mhz(channel->width));
+}
+
+/* Once per association: what the firmware joined with. */
+static void link_info_log(struct centauri_t6050_wifi *wifi)
+{
+	const struct link_info *info = &wifi->link;
+	char line[200];
+	int n;
+	unsigned int i;
+
+	if (wifi->link_logged || !info->valid || !info->phy_mode)
+		return;
+	wifi->link_logged = true;
+	n = scnprintf(line, sizeof(line), "%s, ", link_phy_name(info->phy_mode));
+	n += link_channel_print(line + n, sizeof(line) - n, &info->channel);
+	if (info->mlo_links)
+		n += scnprintf(line + n, sizeof(line) - n, "; MLO, %u links:",
+			       info->mlo_links);
+	for (i = 0; i < info->mlo_links; i++) {
+		n += scnprintf(line + n, sizeof(line) - n, " [");
+		n += link_channel_print(line + n, sizeof(line) - n,
+					&info->mlo_channel[i]);
+		n += scnprintf(line + n, sizeof(line) - n, "]");
+	}
+	dev_info(&wifi->control->pdev->dev, "Wi-Fi link: %s\n", line);
 }
 
 static void drain(struct centauri_t6050_wifi *wifi)
@@ -1880,6 +1997,8 @@ static void connect_worker(struct work_struct *work)
 		wifi->connected_at = jiffies;
 		wifi->station_signal_at = jiffies - HZ;
 		wifi->station_start = wifi->netdev->stats;
+		wifi->link_logged = false;
+		memset(&wifi->link, 0, sizeof(wifi->link));
 	}
 
 	if (command_payload_consumed(wifi, slot))
@@ -1910,6 +2029,8 @@ static void connect_worker(struct work_struct *work)
 		if (wifi->data_rings_open & BIT(5))
 			netif_wake_queue(wifi->netdev);
 		schedule_work(&wifi->link_work);
+		/* Logs the PHY mode, channel and MLO links it joined with. */
+		query_link_status(wifi);
 	}
 	mutex_unlock(&wifi->lock);
 }
@@ -2359,14 +2480,58 @@ static int query_link_status(struct centauri_t6050_wifi *wifi)
 	if (!wifi->configured)
 		return -ENETDOWN;
 	ret = command_reply(wifi, 20, NULL, 0, wifi->link_status, &size);
-	if (!ret)
+	if (!ret) {
+		size = min(size, sizeof(wifi->link_status));
+		wifi->link_status_blob.size = size;
 		wifi->station_signal_valid =
-			link_signal_read(wifi->link_status,
-					 min(size, sizeof(wifi->link_status)),
-					 &wifi->station_signal);
+			link_status_read(wifi->link_status, size,
+					 &wifi->station_signal, &wifi->link);
+		if (wifi->connected)
+			link_info_log(wifi);
+	}
 	wifi->station_signal_at = jiffies;
 	return ret;
 }
+
+/* debugfs link_info: what the firmware says about the association now. */
+static int link_info_show(struct seq_file *s, void *unused)
+{
+	struct centauri_t6050_wifi *wifi = s->private;
+	const struct link_info *info = &wifi->link;
+	char line[64];
+	unsigned int i;
+
+	mutex_lock(&wifi->lock);
+	if (!wifi->connected || READ_ONCE(wifi->stopping)) {
+		seq_puts(s, "not associated\n");
+		goto out;
+	}
+	if (query_link_status(wifi)) {
+		seq_puts(s, "interface status query failed\n");
+		goto out;
+	}
+	if (!info->valid) {
+		seq_puts(s, "no link TLV in the interface status\n");
+		goto out;
+	}
+	seq_printf(s, "phy mode: %u (%s)\n", info->phy_mode,
+		   link_phy_name(info->phy_mode));
+	link_channel_print(line, sizeof(line), &info->channel);
+	seq_printf(s, "channel: %s (width code %u)\n", line,
+		   info->channel.width);
+	if (wifi->station_signal_valid)
+		seq_printf(s, "signal: %d dBm\n", wifi->station_signal);
+	seq_printf(s, "mlo links: %u\n", info->mlo_links);
+	for (i = 0; i < info->mlo_links; i++) {
+		link_channel_print(line, sizeof(line), &info->mlo_channel[i]);
+		seq_printf(s, "mlo link %u: %s (width code %u)\n", i, line,
+			   info->mlo_channel[i].width);
+	}
+out:
+	mutex_unlock(&wifi->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(link_info);
 
 int centauri_t6050_wifi_register(struct centauri_t6050 *c)
 {
@@ -2442,6 +2607,11 @@ int centauri_t6050_wifi_register(struct centauri_t6050 *c)
 			    &wifi->hw_channels_blob);
 	debugfs_create_blob("system_caps", 0400, wifi->wiphy->debugfsdir,
 			    &wifi->system_caps_blob);
+	wifi->link_status_blob.data = wifi->link_status;
+	debugfs_create_blob("interface_status", 0400, wifi->wiphy->debugfsdir,
+			    &wifi->link_status_blob);
+	debugfs_create_file("link_info", 0400, wifi->wiphy->debugfsdir, wifi,
+			    &link_info_fops);
 	rtnl_lock();
 	channels_apply(wifi);
 	rtnl_unlock();

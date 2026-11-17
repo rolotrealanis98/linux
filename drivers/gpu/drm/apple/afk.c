@@ -2328,7 +2328,7 @@ reject:
 /* A firmware 27 panel's AV and DP service endpoint (epic/panelavep.c). */
 static bool afk_is_panelav(struct apple_dcp_afkep *ep)
 {
-	return ep->dcp->v27_j714s && ep->endpoint >= 0x20 && ep->endpoint < 0x40 &&
+	return ep->dcp->v27_panel_av && ep->endpoint >= 0x20 && ep->endpoint < 0x40 &&
 	       READ_ONCE(ep->dcp->panelav[ep->endpoint - 0x20]) == ep;
 }
 

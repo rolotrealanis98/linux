@@ -528,9 +528,13 @@ MODULE_PARM_DESC(t6050_ext_sleep,
  * anything is stopped, the link line) is in force on the board it has run on, the J714s.
  * Elsewhere, other boards with the same SoC included, these are as before.
  */
+static bool dcp_v27_j716s_deep_asked(void);
+
 static bool dcp_j714s_ext(struct device *dev)
 {
-	return of_machine_is_compatible("apple,j714s") &&
+	/* The J716s's too when its deep sleep is asked for (appledrm.j716s_deep_sleep), as the K116s */
+	return (of_machine_is_compatible("apple,j714s") ||
+		(of_machine_is_compatible("apple,j716s") && dcp_v27_j716s_deep_asked())) &&
 	       of_device_is_compatible(dev->of_node, "apple,t6050-dcpext");
 }
 
@@ -1596,8 +1600,8 @@ static struct apple_dcp_afkep *dcp_afkep(struct apple_dcp *dcp, u8 endpoint)
 	/* The J700 DCPEXT's audio service sits on endpoint 0x2b, not AV 0x29. */
 	if (!IS_ERR_OR_NULL(dcp->avep) && endpoint == dcp->avep->endpoint)
 		return dcp->avep;
-	/* A firmware 27 panel's AV and DP services (J714s: dcp->v27_j714s). */
-	if (dcp->v27_j714s && endpoint >= 0x20 && endpoint < 0x40) {
+	/* A firmware 27 panel's AV and DP services (J714s, or a J716s asked to: v27_panel_av). */
+	if (dcp->v27_panel_av && endpoint >= 0x20 && endpoint < 0x40) {
 		struct apple_dcp_afkep *ep = READ_ONCE(dcp->panelav[endpoint - 0x20]);
 
 		if (ep)
@@ -4471,7 +4475,7 @@ int dcp_start(struct platform_device *pdev)
 	}
 
 	/* On the board they have run on; elsewhere these endpoints are not started, as before. */
-	if (dcp->v27_j714s && !dcp->external && dcp_has_panel(dcp)) {
+	if (dcp->v27_panel_av && !dcp->external && dcp_has_panel(dcp)) {
 		ret = panelavep_init(dcp);
 		if (ret)
 			dev_warn(dcp->dev, "panel AV and DP services not started: %d\n", ret);
@@ -6576,6 +6580,7 @@ static int dcp_s2r_pm_register(struct apple_dcp *dcp);
 
 /* The J716s's deep sleep on 27.3, asked for on the command line (dcp-v27-sleep.inc). */
 static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags);
+static bool dcp_v27_j716s_panel_av_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags);
 
 static int dcp_platform_probe_pipe(struct platform_device *pdev)
 {
@@ -6681,6 +6686,11 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 		}
 		dcp->v27_sleep_eps = dcp->v27_j714s ||
 				     dcp_v27_j716s_deep_boot(dev, dcp->v27_sleep_tags);
+		dcp->v27_panel_av = dcp->v27_j714s ||
+				    dcp_v27_j716s_panel_av_boot(dev, dcp->v27_sleep_tags);
+		if (!dcp->v27_j714s && dcp->v27_sleep_eps)
+			dev_info(dev, "J716s: deep sleep's display step set up at boot (appledrm.j716s_deep_sleep=1): endpoints tracked%s\n",
+				 dcp->v27_panel_av ? ", the panel's AV and DP services started (appledrm.j716s_panel_av=1)" : "");
 	}
 	if (fw_compat == DCP_FIRMWARE_V_26_6_DESKTOP) {
 		dcp->desktop = devm_kzalloc(dev, sizeof(*dcp->desktop), GFP_KERNEL);

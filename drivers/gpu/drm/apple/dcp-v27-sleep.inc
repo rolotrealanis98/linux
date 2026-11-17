@@ -499,9 +499,36 @@ static bool j716s_deep_sleep;
 module_param(j716s_deep_sleep, bool, 0644);
 MODULE_PARM_DESC(j716s_deep_sleep, "J716s, DCP firmware 27.3: run the firmware 27 display sleep's step for a deep sleep with the 27.3 tags instead of refusing it at .prepare (on the command line: its endpoints are tracked from the boot; default 0)");
 
+/*
+ * The internal processor and, as on the K116s, the four external engines: the deep sleep stops
+ * every display processor, and an engine the boot loader handed over is stopped only by its
+ * own step (aura hands them over on 27.3 only with this switch on the command line).
+ */
 static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
 {
 	return tags && READ_ONCE(j716s_deep_sleep) && of_machine_is_compatible("apple,j716s") &&
+	       (of_device_is_compatible(dev->of_node, "apple,t6050-dcp") ||
+		of_device_is_compatible(dev->of_node, "apple,t6050-dcpext"));
+}
+
+static bool dcp_v27_j716s_deep_asked(void)
+{
+	return READ_ONCE(j716s_deep_sleep);
+}
+
+/*
+ * The panel's AV and DP services on the J716s, as the J714s and the K116s start them: after a
+ * firmware-driven sleep the restarted DCP announces the panel's video interface again and the
+ * AP opens it (apple,panel-video-open-delay-us). Never run on the J716s before; only on the
+ * command line, and only with the deep sleep's switch.
+ */
+static bool j716s_panel_av;
+module_param(j716s_panel_av, bool, 0444);
+MODULE_PARM_DESC(j716s_panel_av, "J716s, DCP firmware 27.3, with appledrm.j716s_deep_sleep=1: also start the panel's AV and DP services at boot, as the J714s and K116s do (command line only; default 0)");
+
+static bool dcp_v27_j716s_panel_av_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
+{
+	return j716s_panel_av && dcp_v27_j716s_deep_boot(dev, tags) &&
 	       of_device_is_compatible(dev->of_node, "apple,t6050-dcp");
 }
 
@@ -2296,6 +2323,11 @@ static bool dcp_v27_sleep_selected(struct apple_dcp *dcp) { return false; }
 static void dcp_v27_sleep_invalidate(struct apple_dcp *dcp) { }
 static int dcp_v27_sleep_known(struct apple_dcp *dcp) { return 0; }
 static bool dcp_v27_j716s_deep_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
+{
+	return false;
+}
+static bool dcp_v27_j716s_deep_asked(void) { return false; }
+static bool dcp_v27_j716s_panel_av_boot(struct device *dev, const struct iomfb_v27_sleep_tags *tags)
 {
 	return false;
 }

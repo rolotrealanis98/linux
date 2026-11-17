@@ -19,6 +19,10 @@ const SHRINK_WAKE_NS: u64 = 1_000_000_000;
 /// completion records alone keep the worker busy.
 const HOUSEKEEPING_NS: u64 = 1_000_000;
 
+/// Commands a completion sweep found finished without a notification, since boot
+/// ([`Firmware::sweep_completions`]).
+static SWEPT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
 struct Service<'a> {
     firmware: &'a mut Firmware,
     deferred: &'a mut DeferredBatch,
@@ -320,6 +324,34 @@ impl recovery::Queues for Service<'_> {
 }
 
 impl Firmware {
+    /// M5: the completion sweep ([`crate::g17::Shared::queue_sweep`]). A render pair is observed
+    /// only once its fragment queue's stamp notification arrived (the stamp-wait latch is off on
+    /// M5) and a compute queue only on its own notification or a pass without any. A command
+    /// whose notification never comes would wait for the next completion of the same queue: for
+    /// a compositor, its next frame, which waits for the display flip that waits for this
+    /// command's fence. So, with the ring drained, retire whatever the stamps in memory already
+    /// show finished: scan every compute queue as a pass without notifications does, and mark
+    /// the pairs whose stamps cover their published front for the observation that follows.
+    /// The stamps stay the only witness on M5, as without the sweep.
+    fn sweep_completions(&mut self, deferred: &mut DeferredBatch) -> Result {
+        let before = deferred.pending();
+        self.scan_compute(None, deferred)?;
+        let compute = deferred.pending().saturating_sub(before);
+        let render = self.sweep_render_completions()?;
+        let found = (compute + render) as u64;
+        if found == 0 {
+            return Ok(());
+        }
+        let total = SWEPT.fetch_add(found, core::sync::atomic::Ordering::Relaxed) + found;
+        if total == found || total / 64 != (total - found) / 64 {
+            pr_info!(
+                "G17: completion sweep: lifetime total {} commands found finished without a completion notification (this pass: {} compute, {} render)\n",
+                total, compute, render
+            );
+        }
+        Ok(())
+    }
+
     fn release_compute_witnesses(&mut self, deferred: &mut DeferredBatch) -> Result {
         let state = recovery::Memory::recovery_state(&self.init)?;
         let port = &self.port;
@@ -571,6 +603,14 @@ impl crate::g17::Shared {
         // Publication may service events but must never recurse into replay.
         firmware.replay_compute(deferred)?;
         firmware.replay_render(deferred)?;
+        // Taken whether or not it can run now: the pass re-arms the sweep while work is in
+        // flight, and the recovery's own rescans cover the work it settles.
+        let sweep = self
+            .sweep_due
+            .swap(false, core::sync::atomic::Ordering::AcqRel);
+        if sweep && firmware.init.is_m5() && !firmware.recovery.pending() {
+            firmware.sweep_completions(deferred)?;
+        }
         drop(state);
         self.observe_renders(masks, deferred)?;
         let mut state = self.state.lock();
@@ -663,6 +703,10 @@ impl crate::g17::Shared {
             });
         if let Some(delay) = idle {
             self.queue_idle(delay);
+        }
+        // The sweep stays armed while anything published has not retired (M5).
+        if in_flight && firmware.init.is_m5() {
+            self.queue_sweep();
         }
         if firmware.recovery.pending() {
             self.preparations.close();

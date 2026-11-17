@@ -1180,6 +1180,11 @@ const GROW_WORK: u64 = 3;
 const RECLAIM_WORK: u64 = 4;
 const FEED_WORK: u64 = 5;
 const GOVERNOR_WORK: u64 = 6;
+/// M5: the completion sweep's timer ([`Shared::queue_sweep`]).
+const SWEEP_WORK: u64 = 7;
+/// M5: while work is in flight, an event pass looks this often for commands that finished
+/// without a completion notification.
+const SWEEP_MS: u32 = 4;
 
 /// Device state shared with the coprocessor callbacks and the event worker.
 #[pin_data]
@@ -1248,6 +1253,10 @@ struct Shared {
     poll: DelayedWork<Shared, POLL_WORK>,
     #[pin]
     idle: DelayedWork<Shared, IDLE_WORK>,
+    #[pin]
+    sweep: DelayedWork<Shared, SWEEP_WORK>,
+    /// The next event pass runs the completion sweep (M5): set by the sweep timer.
+    sweep_due: AtomicBool,
     /// M5: the thermal governor runs (the firmware has the host power budget word).
     governs: bool,
     #[pin]
@@ -1303,6 +1312,19 @@ impl_has_delayed_work! {
 }
 impl_has_delayed_work! {
     impl HasDelayedWork<Shared, GOVERNOR_WORK> for Shared { self.governor }
+}
+impl_has_delayed_work! {
+    impl HasDelayedWork<Shared, SWEEP_WORK> for Shared { self.sweep }
+}
+impl WorkItem<SWEEP_WORK> for Shared {
+    type Pointer = Arc<Shared>;
+    fn run(this: Arc<Shared>) {
+        if this.sleeping() {
+            return;
+        }
+        this.sweep_due.store(true, Ordering::Release);
+        this.queue_event_records();
+    }
 }
 impl WorkItem<GOVERNOR_WORK> for Shared {
     type Pointer = Arc<Shared>;
@@ -1513,6 +1535,15 @@ impl Shared {
             .enqueue_delayed::<Arc<Self>, POLL_WORK>(self.clone(), msecs_to_jiffies(1));
     }
 
+    /// M5: an event pass within [`SWEEP_MS`] retires what the stamps show finished although no
+    /// completion notification named it (`Firmware::sweep_completions`). Armed at publication
+    /// and by every pass that leaves work in flight; a pending timer is left as it is. Callable
+    /// from any context.
+    fn queue_sweep(self: &Arc<Self>) {
+        let _ = workqueue::system_highpri()
+            .enqueue_delayed::<Arc<Self>, SWEEP_WORK>(self.clone(), msecs_to_jiffies(SWEEP_MS));
+    }
+
     fn queue_governor(self: &Arc<Self>) {
         if !self.governor_armed.swap(true, Ordering::AcqRel) {
             let _ = workqueue::system_unbound().enqueue_delayed::<Arc<Self>, GOVERNOR_WORK>(
@@ -1520,10 +1551,13 @@ impl Shared {
         }
     }
 
-    /// M5: work was published. Arms the thermal governor while it is requested. Called at
-    /// actual publication, by publishers with or without the device mutex; callable from any
-    /// context.
+    /// M5: work was published. Arms the completion sweep, and the thermal governor while it is
+    /// requested. Called at actual publication, by publishers with or without the device mutex;
+    /// callable from any context.
     pub(super) fn note_gpu_activity(self: &Arc<Self>) {
+        if self.m5_board.is_some() {
+            self.queue_sweep();
+        }
         if self.governs && thermal::requested() {
             self.governor_activity_ns.store(now_ns().max(1), Ordering::Release);
             self.queue_governor();
@@ -1793,6 +1827,8 @@ impl Gpu {
                 housekeeping_ns: AtomicU64::new(0),
                 poll <- new_delayed_work!("g17::Shared::poll"),
                 idle <- new_delayed_work!("g17::Shared::idle"),
+                sweep <- new_delayed_work!("g17::Shared::sweep"),
+                sweep_due: AtomicBool::new(false),
                 governs: m5,
                 governor <- new_delayed_work!("g17::Shared::governor"),
                 governor_armed: AtomicBool::new(false),
@@ -2453,6 +2489,7 @@ impl Gpu {
         self.shared.stop_queues();
         self.shared.disable_timer(&self.shared.poll);
         self.shared.disable_timer(&self.shared.idle);
+        self.shared.disable_timer(&self.shared.sweep);
         self.shared.disable_timer(&self.shared.governor);
         if let Some(firmware) = (*self.shared.state.lock()).as_deref_mut() {
             firmware.governor_restore();

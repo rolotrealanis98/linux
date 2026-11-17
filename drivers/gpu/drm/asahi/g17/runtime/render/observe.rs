@@ -53,6 +53,54 @@ impl crate::g17::Firmware {
         Ok(None)
     }
 
+    /// The render half of the M5 completion sweep (`Firmware::sweep_completions`): note the
+    /// fragment bit of every pair whose stamps cover its published front although no
+    /// notification named it, for [`crate::g17::Shared::observe_renders`] to observe and retire
+    /// it as if the notification had come. Returns how many pairs it noted.
+    pub(in crate::g17) fn sweep_render_completions(&mut self) -> Result<usize> {
+        if self.recovery.pending() {
+            return Ok(0);
+        }
+        let state = crate::g17::recovery::Memory::recovery_state(&self.init)?;
+        if state != 0 {
+            return Ok(0);
+        }
+        let mut noted = 0;
+        for slot in 1..self.queues.render.entries.len() {
+            let Some(entry) = self.queues.render.entries[slot].as_ref() else {
+                continue;
+            };
+            if entry.preparing.is_some() || entry.growing {
+                continue;
+            }
+            let Some(pair) = entry.pair.as_ref() else {
+                continue;
+            };
+            let qids = pair.qids();
+            if !pair.published_in_flight()
+                || crate::g17::queue::render::completion_noted(qids, entry.event_masks)
+            {
+                continue;
+            }
+            let stamps = [
+                self.init.stamp(qids[0])?.load(Ordering::Relaxed),
+                self.init.stamp(qids[1])?.load(Ordering::Relaxed),
+            ];
+            core::sync::atomic::fence(Ordering::Acquire);
+            let fragment = usize::from(qids[1]);
+            let mut masks = [0u64; 2];
+            masks[fragment / 64] |= 1u64 << (fragment % 64);
+            // The prefilter the observation applies itself: both stamps cover the front.
+            if pair.observation_packet(masks, stamps, state)?.is_none() {
+                continue;
+            }
+            let entry = self.queues.render.entries[slot].as_mut().ok_or(EIO)?;
+            entry.event_masks[fragment / 64] |= masks[fragment / 64];
+            noted += 1;
+        }
+        Ok(noted)
+    }
+
     pub(super) fn settle_render_terminal(
         &mut self,
         slot: usize,

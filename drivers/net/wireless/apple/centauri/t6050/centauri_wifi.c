@@ -90,7 +90,8 @@ struct centauri_t6050_wifi {
 	u8 tx_defaults_applied;
 	struct ieee80211_supported_band bands[3];
 	struct ieee80211_channel channels[CEN_CHANNELS];
-	struct ieee80211_sband_iftype_data iftype_6ghz;
+	/* Indexed by the firmware's band number (see firmware_band()). */
+	struct ieee80211_sband_iftype_data iftype[3];
 	/* The firmware's own reports, read at bring-up (system commands 19 and 8). */
 	u8 hw_channels[REPLY_SIZE], system_caps[REPLY_SIZE];
 	struct debugfs_blob_wrapper hw_channels_blob, system_caps_blob;
@@ -993,34 +994,49 @@ static void channels_apply(struct centauri_t6050_wifi *wifi)
 }
 
 /*
- * 6 GHz needs HE: the station's HE capabilities element as the firmware
- * reports it (capabilities TLV 0xff), with the 6 GHz band capabilities taken
- * from its VHT element (TLV 0xbf). Without them the band is not registered.
+ * The station capabilities the firmware reports (system command 8, TLVs of
+ * a 16-bit tag and length): the HE capabilities element in TLV 0xff and the
+ * VHT capabilities element in TLV 0xbf. The firmware builds the association
+ * request itself, so these only tell cfg80211 and the clients (which rank
+ * BSSes by the throughput both ends support) what the station can do.
+ *
+ * No EHT capabilities element is among them (firmware 93.1.7 of macOS 27.3),
+ * and macOS asks for none either: WLANACIAdapter's ACISystemAdapter has
+ * getHTCapability, getVHTCapability and getHECapability and nothing for EHT.
+ * The firmware runs EHT and multi-link setup by itself; the interface status
+ * says when it did (link_status_read()). EHT is therefore not registered.
  */
-static bool he_6ghz_from_firmware(struct centauri_t6050_wifi *wifi)
+static const u8 *caps_element(struct centauri_t6050_wifi *wifi, u16 tag,
+			      u8 ext, size_t min_length)
 {
-	struct ieee80211_sband_iftype_data *data = &wifi->iftype_6ghz;
-	struct ieee80211_sta_he_cap *he = &data->he_cap;
-	const u8 *caps = wifi->system_caps, *he_elem = NULL, *vht = NULL;
-	size_t size = wifi->system_caps_blob.size, pos = 0, mcs;
-	u32 vht_cap = 0;
+	const u8 *caps = wifi->system_caps;
+	size_t size = wifi->system_caps_blob.size, pos = 0;
 
 	while (pos + 4 <= size) {
-		u16 tag = get_unaligned_le16(caps + pos);
+		u16 t = get_unaligned_le16(caps + pos);
 		u16 length = get_unaligned_le16(caps + pos + 2);
 		const u8 *value = caps + pos + 4;
 
 		if (length > size - pos - 4)
 			break;
-		if (tag == WLAN_EID_EXTENSION && length >= 3 + 6 + 11 + 4 &&
-		    value[0] == WLAN_EID_EXTENSION && value[1] == length - 2 &&
-		    value[2] == WLAN_EID_EXT_HE_CAPABILITY)
-			he_elem = value;
-		if (tag == WLAN_EID_VHT_CAPABILITY && length >= 2 + 12 &&
-		    value[0] == WLAN_EID_VHT_CAPABILITY)
-			vht = value;
+		/* The value is the element itself: ID, length, body. */
+		if (t == tag && length >= min_length && length >= 2 &&
+		    value[0] == tag && value[1] == length - 2 &&
+		    (tag != WLAN_EID_EXTENSION || value[2] == ext))
+			return value;
 		pos += 4 + length;
 	}
+	return NULL;
+}
+
+static bool he_from_firmware(struct centauri_t6050_wifi *wifi,
+			     struct ieee80211_sta_he_cap *he)
+{
+	const u8 *he_elem = caps_element(wifi, WLAN_EID_EXTENSION,
+					 WLAN_EID_EXT_HE_CAPABILITY,
+					 3 + 6 + 11 + 4);
+	size_t mcs;
+
 	if (!he_elem)
 		return false;
 	memcpy(&he->he_cap_elem, he_elem + 3, sizeof(he->he_cap_elem));
@@ -1034,21 +1050,69 @@ static bool he_6ghz_from_firmware(struct centauri_t6050_wifi *wifi)
 		       min(mcs - sizeof(he->he_mcs_nss_supp),
 			   sizeof(he->ppe_thres)));
 	he->has_he = true;
-	if (vht)
-		vht_cap = get_unaligned_le32(vht + 2);
-	data->he_6ghz_capa.capa = cpu_to_le16(
-		u16_encode_bits(u32_get_bits(vht_cap,
+	return true;
+}
+
+/* The HE PHY channel width bits that apply to a band. */
+#define HE_WIDTH_2GHZ                                                \
+	(IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_IN_2G |       \
+	 IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_RU_MAPPING_IN_2G)
+#define HE_WIDTH_5GHZ                                                \
+	(IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_40MHZ_80MHZ_IN_5G | \
+	 IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_160MHZ_IN_5G |      \
+	 IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_80PLUS80_MHZ_IN_5G | \
+	 IEEE80211_HE_PHY_CAP0_CHANNEL_WIDTH_SET_RU_MAPPING_IN_5G)
+
+/*
+ * HE on every band, from the one element the firmware reports, keeping only
+ * the width bits of each band. 6 GHz also needs the 6 GHz band capabilities,
+ * taken from the VHT element; without HE the 6 GHz band is not registered.
+ * VHT goes on 5 GHz.
+ */
+static bool caps_from_firmware(struct centauri_t6050_wifi *wifi)
+{
+	struct ieee80211_sta_vht_cap *vht_cap = &wifi->bands[1].vht_cap;
+	const u8 *vht = caps_element(wifi, WLAN_EID_VHT_CAPABILITY, 0, 2 + 12);
+	struct ieee80211_sta_he_cap he = {};
+	u32 vht_info = vht ? get_unaligned_le32(vht + 2) : 0;
+	unsigned int band;
+
+	dev_info(&wifi->control->pdev->dev,
+		 "Wi-Fi firmware capabilities: VHT %s, HE %s, EHT %s\n",
+		 vht ? "yes" : "no",
+		 caps_element(wifi, WLAN_EID_EXTENSION,
+			      WLAN_EID_EXT_HE_CAPABILITY, 3) ? "yes" : "no",
+		 caps_element(wifi, WLAN_EID_EXTENSION,
+			      WLAN_EID_EXT_EHT_CAPABILITY, 3) ? "yes" : "no");
+	if (vht) {
+		vht_cap->vht_supported = true;
+		vht_cap->cap = vht_info;
+		memcpy(&vht_cap->vht_mcs, vht + 6, sizeof(vht_cap->vht_mcs));
+	}
+	if (!he_from_firmware(wifi, &he))
+		return false;
+	for (band = 0; band < ARRAY_SIZE(wifi->iftype); band++) {
+		struct ieee80211_sband_iftype_data *data = &wifi->iftype[band];
+		u8 all = he.he_cap_elem.phy_cap_info[0];
+
+		data->types_mask = BIT(NL80211_IFTYPE_STATION);
+		data->he_cap = he;
+		data->he_cap.he_cap_elem.phy_cap_info[0] =
+			(all & ~(HE_WIDTH_2GHZ | HE_WIDTH_5GHZ)) |
+			(all & (band ? HE_WIDTH_5GHZ : HE_WIDTH_2GHZ));
+	}
+	wifi->iftype[2].he_6ghz_capa.capa = cpu_to_le16(
+		u16_encode_bits(u32_get_bits(vht_info,
 					     IEEE80211_VHT_CAP_MAX_A_MPDU_LENGTH_EXPONENT_MASK),
 				IEEE80211_HE_6GHZ_CAP_MAX_AMPDU_LEN_EXP) |
-		u16_encode_bits(vht_cap & IEEE80211_VHT_CAP_MAX_MPDU_MASK,
+		u16_encode_bits(vht_info & IEEE80211_VHT_CAP_MAX_MPDU_MASK,
 				IEEE80211_HE_6GHZ_CAP_MAX_MPDU_LEN) |
 		u16_encode_bits(WLAN_HT_CAP_SM_PS_DISABLED,
 				IEEE80211_HE_6GHZ_CAP_SM_PS) |
-		(vht_cap & IEEE80211_VHT_CAP_RX_ANTENNA_PATTERN ?
+		(vht_info & IEEE80211_VHT_CAP_RX_ANTENNA_PATTERN ?
 			 IEEE80211_HE_6GHZ_CAP_RX_ANTPAT_CONS : 0) |
-		(vht_cap & IEEE80211_VHT_CAP_TX_ANTENNA_PATTERN ?
+		(vht_info & IEEE80211_VHT_CAP_TX_ANTENNA_PATTERN ?
 			 IEEE80211_HE_6GHZ_CAP_TX_ANTPAT_CONS : 0));
-	data->types_mask = BIT(NL80211_IFTYPE_STATION);
 	return true;
 }
 
@@ -1090,9 +1154,10 @@ static void bands_init(struct centauri_t6050_wifi *wifi)
 	}
 	wifi->wiphy->bands[NL80211_BAND_2GHZ] = &wifi->bands[0];
 	wifi->wiphy->bands[NL80211_BAND_5GHZ] = &wifi->bands[1];
-	if (he_6ghz_from_firmware(wifi)) {
-		_ieee80211_set_sband_iftype_data(&wifi->bands[2],
-						 &wifi->iftype_6ghz, 1);
+	if (caps_from_firmware(wifi)) {
+		for (i = 0; i < ARRAY_SIZE(wifi->iftype); i++)
+			_ieee80211_set_sband_iftype_data(&wifi->bands[i],
+							 &wifi->iftype[i], 1);
 		wifi->wiphy->bands[NL80211_BAND_6GHZ] = &wifi->bands[2];
 	} else {
 		dev_warn(&wifi->control->pdev->dev,

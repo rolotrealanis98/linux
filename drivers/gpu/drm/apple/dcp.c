@@ -559,6 +559,7 @@ bool dcp_t6041_ext_enabled(void)
 #include "dcp-peer-v27.inc"
 /* EXPERIMENTAL: "echo 1 > panel_calibration" sends the panel's compensation tables (dcp-panelcal.inc) */
 static int dcp_panelcal_load(struct apple_dcp *dcp);
+static void dcp_panelcal_work(struct work_struct *work);
 
 static ssize_t panel_calibration_store(struct device *dev, struct device_attribute *attr,
 				       const char *buf, size_t count)
@@ -6749,6 +6750,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 	mutex_init(&dcp->external_lock);
 	INIT_WORK(&dcp->external_stop_work, dcp_external_stop_work);
 	INIT_DELAYED_WORK(&dcp->external_stop_retry_wq, dcp_external_stop_retry);
+	INIT_DELAYED_WORK(&dcp->panelcal_wq, dcp_panelcal_work);
 	mutex_init(&dcp->tb_lock);
 	dcp_fabric_init(dcp);
 	spin_lock_init(&dcp->mode_state.lock);
@@ -7328,6 +7330,8 @@ static void dcp_platform_remove(struct platform_device *pdev)
 	struct apple_dcp *dcp = platform_get_drvdata(pdev);
 
 	if (dcp) {
+		if (dcp->panelcal_wq.work.func)
+			cancel_delayed_work_sync(&dcp->panelcal_wq);
 		cancel_work_sync(&dcp->s2r_prewarm_work);
 		cancel_delayed_work_sync(&dcp->s2r_prewarm_off_wq);
 	}
@@ -9009,6 +9013,9 @@ static int dcp_platform_suspend(struct device *dev)
 	/* Its power sequences may crash the DCP and blank the panel. */
 	if (dcp_takeover_was_aborted(dcp))
 		return -EBUSY;
+
+	if (dcp->panelcal_wq.work.func)
+		cancel_delayed_work_sync(&dcp->panelcal_wq);
 
 	/*
 	 * An external DCP given up at probe may never have set up the works

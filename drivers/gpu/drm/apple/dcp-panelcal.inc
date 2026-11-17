@@ -147,7 +147,7 @@ static int dcp_panelcal_vendor(struct apple_dcp *dcp)
 	u8 *buf;
 	int ret;
 
-	ret = request_firmware(&fw, PANELCAL_FW_IRDC, dcp->dev);
+	ret = firmware_request_nowarn(&fw, PANELCAL_FW_IRDC, dcp->dev);
 	if (ret)
 		return ret;
 	p = fw->data;
@@ -200,7 +200,7 @@ static int dcp_panelcal_load(struct apple_dcp *dcp)
 
 	if (dcp->fw_compat != DCP_FIRMWARE_V_27_0 || !dcp->main_display)
 		return -EOPNOTSUPP;
-	ret = request_firmware(&fw, PANELCAL_FW, dcp->dev);
+	ret = firmware_request_nowarn(&fw, PANELCAL_FW, dcp->dev);
 	if (ret)
 		return ret;
 	/* The container sits in an IMG4 payload wrapper: its top record starts with the tag. */
@@ -302,4 +302,36 @@ out:
 	if (!ret)
 		ret = dcp_panelcal_vendor(dcp);
 	return ret;
+}
+
+/*
+ * After each firmware start. The files may not be reachable yet at boot (root not mounted):
+ * tried again a few times, then given up quietly, as on a machine that has none.
+ */
+#define PANELCAL_TRIES		12
+#define PANELCAL_RETRY_MS	5000
+
+static void dcp_panelcal_work(struct work_struct *work)
+{
+	struct apple_dcp *dcp = container_of(to_delayed_work(work), struct apple_dcp, panelcal_wq);
+	int ret;
+
+	if (!READ_ONCE(dcp->active) || dcp->crashed)
+		return;
+	ret = dcp_panelcal_load(dcp);
+	if (ret == -ENOENT && ++dcp->panelcal_tries < PANELCAL_TRIES)
+		schedule_delayed_work(&dcp->panelcal_wq, msecs_to_jiffies(PANELCAL_RETRY_MS));
+	else if (ret == -ENOENT)
+		dev_info(dcp->dev, "panel calibration: no %s or %s: the panel runs without its compensation tables\n",
+			 PANELCAL_FW, PANELCAL_FW_IRDC);
+	else if (ret)
+		dev_warn(dcp->dev, "panel calibration: not loaded: %d\n", ret);
+}
+
+void dcp_panelcal_schedule(struct apple_dcp *dcp, unsigned int delay_ms)
+{
+	if (dcp->fw_compat != DCP_FIRMWARE_V_27_0 || !of_machine_is_compatible("apple,k116s"))
+		return;
+	dcp->panelcal_tries = 0;
+	mod_delayed_work(system_wq, &dcp->panelcal_wq, msecs_to_jiffies(delay_ms));
 }

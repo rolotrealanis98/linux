@@ -2152,12 +2152,19 @@ impl InitData {
     /// M5 only: whether the firmware's emergency clamp is active, from its primary performance
     /// limiter in the shared power-policy block.
     pub(super) fn m5_firmware_clamped(&self) -> Result<bool> {
+        let (mask, limit) = self.m5_limiter()?;
+        Ok(super::thermal::is_emergency_clamp(mask, limit))
+    }
+
+    /// M5 only: the firmware's primary performance limiter, the mask of its active limit reasons
+    /// and the limit, from the shared power-policy block.
+    pub(super) fn m5_limiter(&self) -> Result<(u32, u32)> {
         if !self.m5 { return Err(EINVAL); }
         let block = self.object(self.bundle)?;
         let base = self.graph.shared.policy;
         let mask = block.word(base + super::thermal::POLICY_LIMITER_MASK)?.load(Ordering::Relaxed);
         let limit = block.word(base + super::thermal::POLICY_LIMITER_LIMIT)?.load(Ordering::Relaxed);
-        Ok(super::thermal::is_emergency_clamp(mask, limit))
+        Ok((mask, limit))
     }
 
     /// M5 only: publishes the host GPU power budget like the effort input.

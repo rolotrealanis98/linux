@@ -116,7 +116,43 @@ fn write_power(
     writeln!(f, "power_management=firmware sampled_ns={} core_power={:#x} cores_powered={} host_hold={} idle_hold_ms={}",
         super::now_ns(), core_power, core_power & 0xf != 0, firmware.hold.active(),
         super::power::IDLE_HOLD_MS.load(core::sync::atomic::Ordering::Relaxed))?;
-    firmware.port.write_power(f)
+    firmware.port.write_power(f)?;
+    write_performance(firmware, f)
+}
+
+/// M5: what the host asks of the firmware's performance control and what the firmware reports
+/// back: the effort word as published (of 65536; 0 lets the firmware choose), whether a thread
+/// waits for the work, the light-effort state and the busy share it follows, and from the shared
+/// power-policy block the GPU's power draw, the host power budget and the primary limiter.
+fn write_performance(
+    firmware: &super::Firmware,
+    f: &mut kernel::fmt::Formatter<'_>,
+) -> kernel::fmt::Result {
+    if !firmware.init.is_m5() {
+        return Ok(());
+    }
+    let (light, busy) = super::power::light_state();
+    write!(
+        f,
+        "effort_published={:#x} waited={} light={} light_effort={:#x} busy_permille={}",
+        firmware.effort.applied(),
+        firmware.effort.waited(),
+        light,
+        super::power::LIGHT_EFFORT.load(core::sync::atomic::Ordering::Relaxed),
+        busy
+    )?;
+    match firmware.init.m5_gpu_power_mw() {
+        Ok(mw) => write!(f, " gpu_power_mw={}", mw)?,
+        Err(_) => write!(f, " gpu_power_mw=unsupported")?,
+    }
+    match firmware.init.m5_power_budget() {
+        Ok(mw) => write!(f, " power_budget_mw={}", mw)?,
+        Err(_) => write!(f, " power_budget_mw=unsupported")?,
+    }
+    match firmware.init.m5_limiter() {
+        Ok((mask, limit)) => writeln!(f, " limiter_mask={:#x} limiter_limit={}", mask, limit),
+        Err(_) => writeln!(f, " limiter=unsupported"),
+    }
 }
 
 /// Actual firmware-managed core gating, separate from generic Linux runtime PM.

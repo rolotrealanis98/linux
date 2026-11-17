@@ -1327,6 +1327,8 @@ static void dcp_panel_read_adt(struct apple_dcp *dcp)
 		dcp->panel.height_mm = panel.height_mm;
 	if (dcp->panel_identity)
 		dcp->panel_identity->adt = panel.identity;
+	dcp->panelcal_ffr[0] = (u64)panel.first_frame_response * 10 >> 8;
+	dcp->panelcal_ffr[1] = (u64)panel.first_frame_response_high * 10 >> 8;
 	dcp->panel.color_target = ret ? NULL : dcp_panel_gamut_color_space(panel.gamut);
 	if (desktop || dcp->fw_compat == DCP_FIRMWARE_V_27_0)
 		dcp->panel.edr_ceiling = dcp_edr_ceiling(panel.edr_potential_headroom);

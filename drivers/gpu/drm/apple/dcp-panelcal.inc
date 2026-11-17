@@ -15,8 +15,11 @@
  * from other files and are not sent yet.
  */
 #include <linux/crc32.h>
+#include <linux/fpu.h>
 #include <linux/firmware.h>
 #include <linux/sort.h>
+
+#include "dcp-panelcal-fp.h"
 
 #define PANELCAL_FW		"apple/panel-adcl.bin"
 /* The model's IR-drop vendor data: macOS's /System/Library/Display/<model>/<index>-irdc.bin */
@@ -24,6 +27,8 @@
 /* Likewise <index>-lcdca.bin and <index>-ptuc.bin; both optional */
 #define PANELCAL_FW_CA		"apple/panel-lcdca.bin"
 #define PANELCAL_FW_PTUC	"apple/panel-ptuc.bin"
+/* Likewise <index>-od.bin: the pixel compensation (PDC) tables of the model's calibration bins */
+#define PANELCAL_FW_PDC		"apple/panel-od.bin"
 #define PANELCAL_TAG(a, b, c, d) ((u32)(d) | (u32)(c) << 8 | (u32)(b) << 16 | (u32)(a) << 24)
 #define PANELCAL_IRDC		PANELCAL_TAG('I', 'R', 'D', 'C')
 #define PANELCAL_ELVS		PANELCAL_TAG('E', 'L', 'V', 'S')
@@ -32,9 +37,13 @@
 #define PANELCAL_CA		PANELCAL_TAG(' ', ' ', 'C', 'A')
 #define PANELCAL_PTUP		PANELCAL_TAG('P', 'T', 'U', 'p')
 #define PANELCAL_PTUC		PANELCAL_TAG('P', 'T', 'U', 'C')
+#define PANELCAL_PDCP		PANELCAL_TAG('P', 'D', 'C', 'p')
+#define PANELCAL_PDCC		PANELCAL_TAG('P', 'D', 'C', 'c')
 
 #define PANELCAL_BLOCK_IRDC_DATA	118
 #define PANELCAL_BLOCK_CA		8
+#define PANELCAL_BLOCK_PDC_LUTS		27
+#define PANELCAL_BLOCK_PDC_CONFIG	28
 #define PANELCAL_BLOCK_PTUC_CONFIG	115
 #define PANELCAL_BLOCK_PTUC_LUTS	116
 #define PANELCAL_BLOCK_IRDC_VENDOR	119
@@ -53,6 +62,14 @@
 #define PANELCAL_PTUC_BODY	(96 + 2 * 3 * 2 * 3 * 11 * 21)
 #define PANELCAL_PTUC_NITS	16
 #define PANELCAL_PTUC_MAX	32
+#define PANELCAL_PDC_CFG	2580
+#define PANELCAL_PDC_HDR	0xda0
+#define PANELCAL_PDC_BUF	0x4000
+#define PANELCAL_PDC_GRID	24
+#define PANELCAL_PDC_LIST	20
+#define PANELCAL_PDC_TYPES	4
+#define PANELCAL_PDC_GROUPS	1024
+#define PANELCAL_PDC_BINS	8
 #define PANELCAL_ELVS_TAPS	40
 #define PANELCAL_ELVS_BUF	0x4000
 #define PANELCAL_ELVS_MAX	10
@@ -306,6 +323,361 @@ out:
 }
 
 /*
+ * Pixel compensation (PDC, blocks 28 and 27). The model's file has the tables of a few
+ * calibration bins; the panel's place between two of them comes from its first-frame response
+ * (Apple's device tree), and each table sent is the blend of those two bins' tables.
+ */
+struct panelcal_pdc_group {
+	s32 temp;
+	u16 bright, subframes, on, type;
+	const u8 *dc[3], *pm[3];
+};
+
+struct panelcal_pdc {
+	u32 lo[PANELCAL_PDC_BINS], hi[PANELCAL_PDC_BINS], mix;
+	u32 types[PANELCAL_PDC_TYPES], tab[PANELCAL_PDC_TYPES][PANELCAL_PDC_LIST];
+	u32 mm[PANELCAL_PDC_LIST * PANELCAL_PDC_LIST];
+	u16 tab_n[PANELCAL_PDC_TYPES], rep[PANELCAL_PDC_LIST];
+	u16 c612, c614, c2564, c616, c618, c2566, c2572, c2576;
+	unsigned int nb, ntab, n_sf0, nrep, m;
+	/* gathered from the records, ascending */
+	s32 temps[PANELCAL_PDC_LIST], brights[PANELCAL_PDC_LIST], ons[PANELCAL_PDC_LIST];
+	s32 tys[PANELCAL_PDC_LIST], sfs[PANELCAL_PDC_TYPES][PANELCAL_PDC_LIST];
+	unsigned int ntemps, nbrights, nons, ntys, nsfs[PANELCAL_PDC_TYPES];
+	unsigned int ngroups[2];
+	struct panelcal_pdc_group groups[2][PANELCAL_PDC_GROUPS];
+};
+
+static bool panelcal_set_add(s32 *v, unsigned int *n, s32 x)
+{
+	unsigned int i, j;
+
+	for (i = 0; i < *n && v[i] < x; i++)
+		;
+	if (i < *n && v[i] == x)
+		return true;
+	if (*n == PANELCAL_PDC_LIST)
+		return false;
+	for (j = (*n)++; j > i; j--)
+		v[j] = v[j - 1];
+	v[i] = x;
+	return true;
+}
+
+static int panelcal_set_find(const s32 *v, unsigned int n, s32 x)
+{
+	for (unsigned int i = 0; i < n; i++)
+		if (v[i] == x)
+			return i;
+	return -1;
+}
+
+static struct panelcal_pdc_group *panelcal_pdc_find(struct panelcal_pdc *pdc, unsigned int list,
+						     s32 temp, u16 bright, u16 subframes, u16 on,
+						     u16 type)
+{
+	for (unsigned int i = 0; i < pdc->ngroups[list]; i++) {
+		struct panelcal_pdc_group *g = &pdc->groups[list][i];
+
+		if (g->temp == temp && g->bright == bright && g->subframes == subframes &&
+		    g->on == on && g->type == type)
+			return g;
+	}
+	return NULL;
+}
+
+/* The parameter record: fields one after another */
+static int panelcal_pdc_params(struct panelcal_pdc *pdc, const u8 *s, size_t len)
+{
+	const u8 *e = s + len;
+	unsigned int i, k, n;
+
+#define NEED(bytes) do { if ((size_t)(e - s) < (size_t)(bytes)) return -EINVAL; } while (0)
+#define U16() ({ u16 __v; NEED(2); __v = get_unaligned_le16(s); s += 2; __v; })
+#define U32() ({ u32 __v; NEED(4); __v = get_unaligned_le32(s); s += 4; __v; })
+	NEED(16);
+	pdc->n_sf0 = get_unaligned_le16(s + 8);
+	if (get_unaligned_le16(s + 10) != 3)
+		return -EINVAL;
+	pdc->nb = get_unaligned_le16(s + 14) + 1;
+	s += 16;
+	if (pdc->nb < 2 || pdc->nb > PANELCAL_PDC_BINS)
+		return -EINVAL;
+	for (i = 0; i < pdc->nb; i++)
+		pdc->lo[i] = U32();
+	for (i = 0; i < pdc->nb; i++)
+		pdc->hi[i] = U32();
+	pdc->mix = U32();
+	U16();
+	pdc->ntab = U16();
+	if (!pdc->ntab || pdc->ntab > PANELCAL_PDC_TYPES)
+		return -EINVAL;
+	for (k = 0; k < pdc->ntab; k++)
+		pdc->types[k] = U32();
+	if (pdc->types[0])
+		return -EINVAL;
+	for (k = 0; k < pdc->ntab; k++) {
+		n = U16();
+		if (!n || n > PANELCAL_PDC_LIST)
+			return -EINVAL;
+		pdc->tab_n[k] = n;
+		for (i = 0; i < n; i++)
+			pdc->tab[k][i] = U32();
+	}
+	pdc->c612 = U16();
+	pdc->c614 = U16();
+	pdc->c2564 = U16();
+	pdc->c616 = U16();
+	pdc->c618 = U16();
+	pdc->m = pdc->tab_n[0];
+	for (i = 0; i < pdc->m * pdc->m; i++)
+		pdc->mm[i] = U32();
+	pdc->c2566 = U16();
+	pdc->nrep = U16();
+	if (pdc->nrep > PANELCAL_PDC_LIST)
+		return -EINVAL;
+	NEED(2 * pdc->nrep);
+	s += 2 * pdc->nrep;
+	for (i = 0; i < pdc->nrep; i++)
+		pdc->rep[i] = U16();
+	pdc->c2572 = U16();
+	pdc->c2576 = U16();
+#undef U32
+#undef U16
+#undef NEED
+	return 0;
+}
+
+static int dcp_panelcal_pdc(struct apple_dcp *dcp)
+{
+	const unsigned int g = PANELCAL_PDC_GRID, tbl = 2 * g * g;
+	const u8 *body, *params = NULL, *dcax = NULL, *pmax = NULL;
+	size_t end, off = 12, len, plen = 0;
+	u32 tag, t_bits = 0, crc = ~0, status;
+	unsigned int ibin, i, c, sent = 0;
+	const struct firmware *fw;
+	struct panelcal_pdc *pdc;
+	u16 ver, dver = 0;
+	u8 *cfg, *hdr, *buf;
+	int ret, k;
+
+	if (!dcp->panelcal_ffr[0] || !dcp->panelcal_ffr[1])
+		return -ENODATA;
+	ret = panelcal_file(dcp, PANELCAL_FW_PDC, &fw, &end);
+	if (ret)
+		return ret;
+	pdc = kvzalloc(sizeof(*pdc), GFP_KERNEL);
+	cfg = kzalloc(PANELCAL_PDC_CFG, GFP_KERNEL);
+	hdr = kzalloc(PANELCAL_PDC_HDR, GFP_KERNEL);
+	buf = kvzalloc(PANELCAL_PDC_BUF, GFP_KERNEL);
+	ret = -ENOMEM;
+	if (!pdc || !cfg || !hdr || !buf)
+		goto out;
+
+	/* The parameters first, wherever their record is */
+	while (panelcal_next(fw->data, end, &off, &tag, &ver, &body, &len))
+		if (tag == PANELCAL_PDCP && ver == 6) {
+			params = body;
+			plen = len;
+			break;
+		}
+	ret = -EINVAL;
+	if (!params || panelcal_pdc_params(pdc, params, plen))
+		goto out;
+	kernel_fpu_begin();
+	ibin = dcp_panelcal_fp_bin(pdc->lo, pdc->hi, pdc->nb, pdc->mix, dcp->panelcal_ffr[0],
+				   dcp->panelcal_ffr[1], &t_bits);
+	kernel_fpu_end();
+	dev_info(dcp->dev, "panel calibration: PDC: first-frame response %u, %u: bin %u, weight of the next %#x\n",
+		 dcp->panelcal_ffr[0], dcp->panelcal_ffr[1], ibin, t_bits);
+
+	for (off = 12; panelcal_next(fw->data, end, &off, &tag, &ver, &body, &len);) {
+		struct panelcal_pdc_group *grp;
+		unsigned int bin, list, chans = 0;
+		u16 bright, sf, on, ty;
+		s32 temp;
+
+		if (tag != PANELCAL_PDCC || ver != 6)
+			continue;
+		if (len < 28 + 2 * (2 * g + 2 * g * g) || get_unaligned_le16(body + 6) != g ||
+		    get_unaligned_le16(body + 8) != g)
+			goto out;
+		dver = get_unaligned_le16(body + 4);
+		bin = get_unaligned_le16(body + 10);
+		temp = (s16)get_unaligned_le16(body + 12);
+		ty = get_unaligned_le16(body + 14);
+		sf = get_unaligned_le16(body + 16);
+		bright = get_unaligned_le16(body + 18);
+		on = !memcmp(body + 24, "NO  ", 4);
+		for (i = 0; i < 4; i++)
+			chans |= body[20 + i] == 'R' ? 1 : body[20 + i] == 'G' ? 2 :
+				 body[20 + i] == 'B' ? 4 : 0;
+		for (k = 0; k < pdc->ntab && pdc->types[k] != ty; k++)
+			;
+		if (k == pdc->ntab)
+			goto out;
+		if (!panelcal_set_add(pdc->temps, &pdc->ntemps, temp) ||
+		    !panelcal_set_add(pdc->brights, &pdc->nbrights, bright) ||
+		    !panelcal_set_add(pdc->ons, &pdc->nons, on) ||
+		    !panelcal_set_add(pdc->tys, &pdc->ntys, ty) ||
+		    !panelcal_set_add(pdc->sfs[k], &pdc->nsfs[k], sf))
+			goto out;
+		dcax = body + 28;
+		pmax = body + 28 + 2 * g + tbl;
+		if (bin == ibin)
+			list = 0;
+		else if (bin == ibin + 1 && t_bits)
+			list = 1;
+		else
+			continue;
+		grp = panelcal_pdc_find(pdc, list, temp, bright, sf, on, k);
+		if (!grp) {
+			if (pdc->ngroups[list] == PANELCAL_PDC_GROUPS)
+				goto out;
+			grp = &pdc->groups[list][pdc->ngroups[list]++];
+			*grp = (struct panelcal_pdc_group) { temp, bright, sf, on, k };
+		}
+		for (c = 0; c < 3; c++)
+			if (chans & BIT(c)) {
+				grp->dc[c] = body + 28 + 2 * g;
+				grp->pm[c] = pmax + 2 * g;
+			}
+	}
+	if (!pdc->ngroups[0] || !dcax)
+		goto out;
+
+	/* Block 28: the lists and the parameters */
+	put_unaligned_le32(6, cfg);
+	for (i = 0; i < pdc->ntemps; i++)
+		put_unaligned_le32(div_s64((s64)pdc->temps[i] << 16, 10), cfg + 12 + 4 * i);
+	for (i = 0; i < pdc->nbrights; i++)
+		put_unaligned_le32(pdc->brights[i] << 16, cfg + 92 + 4 * i);
+	for (k = 0; k < PANELCAL_PDC_TYPES; k++) {
+		for (i = 0; i < pdc->nsfs[k]; i++)
+			put_unaligned_le16(pdc->sfs[k][i], cfg + 172 + 40 * k + 2 * i);
+		put_unaligned_le16(pdc->nsfs[k], cfg + 598 + 2 * k);
+	}
+	for (i = 0; i < pdc->nrep; i++)
+		put_unaligned_le16(pdc->rep[i], cfg + 332 + 2 * i);
+	for (i = 0; i < pdc->nons; i++)
+		put_unaligned_le16(pdc->ons[i], cfg + 372 + 2 * i);
+	for (i = 0; i < pdc->ntys; i++)
+		put_unaligned_le32(pdc->tys[i], cfg + 412 + 4 * i);
+	memcpy(cfg + 492, dcax, 2 * g);
+	memcpy(cfg + 540, pmax, 2 * g);
+	put_unaligned_le16(dver, cfg + 588);
+	put_unaligned_le16(pdc->ntemps, cfg + 590);
+	put_unaligned_le16(pdc->nbrights, cfg + 592);
+	put_unaligned_le16(g, cfg + 594);
+	put_unaligned_le16(g, cfg + 596);
+	put_unaligned_le16(pdc->nons, cfg + 606);
+	put_unaligned_le16(pdc->ntab, cfg + 608);
+	put_unaligned_le16(pdc->n_sf0, cfg + 610);
+	put_unaligned_le16(pdc->c612, cfg + 612);
+	put_unaligned_le16(pdc->c614, cfg + 614);
+	put_unaligned_le16(pdc->c616, cfg + 616);
+	put_unaligned_le16(pdc->c618, cfg + 618);
+	for (k = 0; k < pdc->ntab; k++) {
+		put_unaligned_le16(pdc->tab_n[k], cfg + 620 + 2 * k);
+		for (i = 0; i < pdc->tab_n[k]; i++)
+			put_unaligned_le32(pdc->tab[k][i], cfg + 628 + 80 * k + 4 * i);
+		put_unaligned_le32(pdc->types[k], cfg + 948 + 4 * k);
+	}
+	for (i = 0; i < pdc->m * pdc->m; i++)
+		put_unaligned_le32(pdc->mm[i], cfg + 964 + 4 * i);
+	put_unaligned_le16(pdc->c2564, cfg + 2564);
+	put_unaligned_le16(pdc->c2566, cfg + 2566);
+	put_unaligned_le32(pdc->ntys, cfg + 2568);
+	put_unaligned_le32((u32)pdc->c2572 << 16, cfg + 2572);
+	put_unaligned_le32((u32)pdc->c2576 << 16, cfg + 2576);
+	dev_info(dcp->dev, "panel calibration: PDC config crc %#x, %u + %u LUT groups\n",
+		 crc32_le(~0, cfg, PANELCAL_PDC_CFG) ^ ~0U, pdc->ngroups[0], pdc->ngroups[1]);
+	ret = panelcal_send(dcp, PANELCAL_BLOCK_PDC_CONFIG, "PDC config, version", dver, cfg,
+			    PANELCAL_PDC_CFG, NULL, 0);
+	if (ret)
+		goto out;
+
+	/* Block 27 per group, in macOS's order: the last one found first */
+	memset(hdr + 0x9, 0xaa, 7);
+	memset(hdr + 0x27c, 0xaa, PANELCAL_PDC_HDR - 0x27c);
+	put_unaligned_le32(6, hdr);
+	put_unaligned_le32(PANELCAL_PDC_BUF, hdr + 0x10);
+	if (t_bits)
+		put_unaligned_le16(pdc->c2564, hdr + 0x20);
+	for (k = pdc->ngroups[0] - 1; k >= 0; k--) {
+		struct panelcal_pdc_group *a = &pdc->groups[0][k], *b = NULL;
+		int sfi = -1;
+		u64 idx[5];
+
+		for (i = 0; i < pdc->tab_n[a->type]; i++)
+			if (pdc->tab[a->type][i] == a->subframes)
+				sfi = i;
+		idx[0] = panelcal_set_find(pdc->temps, pdc->ntemps, a->temp);
+		idx[1] = panelcal_set_find(pdc->brights, pdc->nbrights, a->bright);
+		idx[2] = sfi;
+		idx[3] = panelcal_set_find(pdc->ons, pdc->nons, a->on);
+		idx[4] = a->type;
+		ret = -EINVAL;
+		if (sfi < 0)
+			break;
+		/*
+		 * The next bin's group: looked up with the first type, whatever this group's is,
+		 * as macOS's loader does. What the panel is shipped with, right or not.
+		 */
+		if (t_bits) {
+			if ((unsigned int)sfi >= pdc->tab_n[0])
+				break;
+			b = panelcal_pdc_find(pdc, 1, a->temp, a->bright, pdc->tab[0][sfi],
+					      a->on, 0);
+			if (!b)
+				break;
+		}
+		for (c = 0; c < 3; c++)
+			if (!a->dc[c] || (b && !b->dc[c]))
+				break;
+		if (c < 3)
+			break;
+		memset(buf, 0, PANELCAL_PDC_BUF);
+		if (b)
+			kernel_fpu_begin();
+		for (c = 0; c < 3; c++) {
+			if (b) {
+				dcp_panelcal_fp_blend(buf + c * tbl, a->dc[c], b->dc[c], g * g,
+						      t_bits);
+				dcp_panelcal_fp_blend(buf + (3 + c) * tbl, a->pm[c], b->pm[c],
+						      g * g, t_bits);
+			} else {
+				memcpy(buf + c * tbl, a->dc[c], tbl);
+				memcpy(buf + (3 + c) * tbl, a->pm[c], tbl);
+			}
+		}
+		if (b)
+			kernel_fpu_end();
+		crc = crc32_le(crc, buf, 6 * tbl);
+		status = ~0U;
+		ret = iomfb_v27_set_block_idx(dcp, PANELCAL_BLOCK_PDC_LUTS, idx, 5, hdr,
+					      PANELCAL_PDC_HDR, buf, PANELCAL_PDC_BUF, &status);
+		if (ret || status) {
+			dev_warn(dcp->dev, "panel calibration: PDC LUT %llu,%llu,%llu,%llu,%llu (%u sent): %d, status %#x%s\n",
+				 idx[0], idx[1], idx[2], idx[3], idx[4], sent, ret, status,
+				 !sent && status == 0x80000001 ? " (already loaded?)" : "");
+			ret = ret ?: -EREMOTEIO;
+			break;
+		}
+		sent++;
+	}
+	dev_info(dcp->dev, "panel calibration: %u of %u PDC LUTs accepted, crc of all %#x, last result %d\n",
+		 sent, pdc->ngroups[0], crc ^ ~0U, ret);
+out:
+	kvfree(buf);
+	kfree(hdr);
+	kfree(cfg);
+	kvfree(pdc);
+	release_firmware(fw);
+	return ret;
+}
+
+/*
  * IR-drop vendor data: an IRDf record's fields follow one another at the record's own tap and
  * repetition counts; the firmware's struct has them at fixed capacities (45 taps, 10 repetitions).
  */
@@ -438,6 +810,9 @@ static int dcp_panelcal_load(struct apple_dcp *dcp)
 	ret = dcp_panelcal_ca(dcp);
 	if (ret && ret != -ENOENT)
 		dev_warn(dcp->dev, "panel calibration: CA data: %d\n", ret);
+	ret = dcp_panelcal_pdc(dcp);
+	if (ret && ret != -ENOENT)
+		dev_warn(dcp->dev, "panel calibration: PDC: %d\n", ret);
 	ret = dcp_panelcal_ptuc(dcp);
 	if (ret && ret != -ENOENT)
 		dev_warn(dcp->dev, "panel calibration: PTUC: %d\n", ret);

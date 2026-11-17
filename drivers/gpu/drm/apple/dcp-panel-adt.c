@@ -123,7 +123,7 @@ static int dcp_adt_node(struct dcp_adt_cursor *c, struct dcp_panel_adt *panel,
 	char node_name[33] = {};
 	enum dcp_panel_gamut gamut = DCP_PANEL_GAMUT_UNSPECIFIED;
 	bool gamut_seen = false, matrix_seen = false, matrix_valid = false;
-	bool product, selected, backlight;
+	bool product, selected, backlight, disp;
 
 	if (IS_ERR(header))
 		return PTR_ERR(header);
@@ -154,6 +154,7 @@ static int dcp_adt_node(struct dcp_adt_cursor *c, struct dcp_panel_adt *panel,
 	selected = (depth == 1 && !strcmp(node_name, "panel")) ||
 		   (product_parent && !strcmp(node_name, "panel"));
 	backlight = depth == 1 && !strcmp(node_name, "backlight");
+	disp = depth == 2 && !strcmp(node_name, "disp0");
 	/* /product carries raw-panel-serial-number on machines without /panel. */
 	c->pos = props_start;
 	for (u32 i = 0; i < props; i++) {
@@ -177,6 +178,10 @@ static int dcp_adt_node(struct dcp_adt_cursor *c, struct dcp_panel_adt *panel,
 			panel->edr_potential_headroom = get_unaligned_le32(prop + 36);
 		else if (backlight && !strcmp(name, "LmaxProduct") && size == 4)
 			panel->lmax_product = get_unaligned_le32(prop + 36);
+		else if (disp && !strcmp(name, "first-frame-response") && size == 4)
+			panel->first_frame_response = get_unaligned_be32(prop + 36);
+		else if (disp && !strcmp(name, "first-frame-response-high") && size == 4)
+			panel->first_frame_response_high = get_unaligned_be32(prop + 36);
 		c->pos += 36 + ALIGN((size_t)size, 4);
 	}
 	if (product)

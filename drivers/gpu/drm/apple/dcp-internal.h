@@ -814,6 +814,8 @@ struct apple_dcp {
 	/* EXPERIMENTAL (K116s): the panel's compensation tables, sent after each firmware start */
 	struct delayed_work panelcal_wq;
 	unsigned int panelcal_tries;
+	/* The panel's first-frame response indexes (ADT), 0.16; 0 if not known */
+	u32 panelcal_ffr[2];
 	/* Stopped and not restarted, which outlives a suspend that gets refused. */
 	bool s2r_fw_down;
 	/* DCPEXT kept down through a dark wake, see dcp_s2r_dark_finish(). */

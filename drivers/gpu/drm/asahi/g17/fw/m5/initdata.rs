@@ -3500,6 +3500,15 @@ pub(crate) struct M5RegisterWindow {
 pub(crate) const M5_MAX_REGISTER_WINDOWS: usize = J775D_REGISTER_WINDOWS.len();
 
 impl Board {
+    /// An M5 Pro board (T6050, two clusters of ten cores) with no power-controller configuration
+    /// of its own: the J716s.
+    pub(crate) fn is_m5_pro_without_controller(&self) -> bool {
+        self.controller_defaults.is_none()
+            && self.chip_id == 0x6050
+            && self.clusters == 2
+            && self.gpu_cores == 20
+    }
+
     /// Whether the board takes the host encodings measured on the M5 Ultra (G17D) where they
     /// differ from J714's, as `super::compute` and the render registers read them.
     pub(crate) const fn g17d_forms(&self) -> bool {

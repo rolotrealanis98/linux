@@ -283,7 +283,21 @@ impl InitData {
                 calibration.as_ref().is_ok_and(|words| words.as_slice() == expected)
             }
         };
-        let controller_defaults = board.controller_defaults.filter(|_| calibrated);
+        // An M5 Pro board with no controller configuration of its own (J716s) can take the
+        // M5 Pro's (J714's, which upstream applies to every J714-board part): without one the
+        // firmware keeps its default budget and runs ALU work at about a fifth of macOS's speed.
+        // Off unless m5_controller_defaults asks for it; the leakage inputs are J714's reference
+        // part's.
+        let borrowed: Option<fn(&mut [u8]) -> core::result::Result<(), m::InitdataError>> =
+            if board.is_m5_pro_without_controller()
+                && crate::module_parameters::m5_controller_defaults.value() == 1
+            {
+                pr_info!("G17: M5 Pro controller configuration on a board without one (m5_controller_defaults)\n");
+                Some(m::encode_m5_policy_controller_defaults)
+            } else {
+                None
+            };
+        let controller_defaults = board.controller_defaults.filter(|_| calibrated).or(borrowed);
         if let Some(defaults) = controller_defaults {
             defaults(self.object_mut(self.bundle)?.bytes_mut()).map_err(|_| EINVAL)?;
             let maximum = self.object(self.bundle)?.word(shared.policy + m::M5_POLICY_MAXIMUM_POWER)?

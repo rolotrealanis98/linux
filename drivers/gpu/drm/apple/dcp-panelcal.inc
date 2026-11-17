@@ -18,18 +18,24 @@
 #include <linux/sort.h>
 
 #define PANELCAL_FW		"apple/panel-adcl.bin"
+/* The model's IR-drop vendor data: macOS's /System/Library/Display/<model>/<index>-irdc.bin */
+#define PANELCAL_FW_IRDC	"apple/panel-irdc.bin"
 #define PANELCAL_TAG(a, b, c, d) ((u32)(d) | (u32)(c) << 8 | (u32)(b) << 16 | (u32)(a) << 24)
 #define PANELCAL_IRDC		PANELCAL_TAG('I', 'R', 'D', 'C')
 #define PANELCAL_ELVS		PANELCAL_TAG('E', 'L', 'V', 'S')
 #define PANELCAL_ADCL		PANELCAL_TAG('A', 'D', 'C', 'L')
+#define PANELCAL_IRDF		PANELCAL_TAG('I', 'R', 'D', 'f')
 
 #define PANELCAL_BLOCK_IRDC_DATA	118
+#define PANELCAL_BLOCK_IRDC_VENDOR	119
 #define PANELCAL_BLOCK_ELVS_CONFIG	122
 #define PANELCAL_BLOCK_ELVS_LUTS	123
 
 #define PANELCAL_IRDC_TAPS	45
 #define PANELCAL_IRDC_TAP_BYTES	(3 * 257 * 4)
 #define PANELCAL_IRDC_BUF	0x24000
+#define PANELCAL_IRDV_BUF	0x6c000
+#define PANELCAL_IRDV_REPS	10
 #define PANELCAL_ELVS_TAPS	40
 #define PANELCAL_ELVS_BUF	0x4000
 #define PANELCAL_ELVS_MAX	10
@@ -66,6 +72,119 @@ static int panelcal_send(struct apple_dcp *dcp, u32 block, const char *what, int
 static int panelcal_cmp(const void *a, const void *b)
 {
 	return ((const struct panelcal_rec *)a)->key - ((const struct panelcal_rec *)b)->key;
+}
+
+/*
+ * IR-drop vendor data: an IRDf record's fields follow one another at the record's own tap and
+ * repetition counts; the firmware's struct has them at fixed capacities (45 taps, 10 repetitions).
+ */
+static int panelcal_irdc_vendor(u8 *d, const u8 *s, size_t len)
+{
+	const u8 *e = s + len;
+	unsigned int n, q, i, j;
+
+	if (len < 6)
+		return -EINVAL;
+	n = get_unaligned_le16(s + 4);
+	if (n > PANELCAL_IRDC_TAPS)
+		return -EINVAL;
+	memset(d, 0, PANELCAL_IRDV_BUF);
+	put_unaligned_le32(1, d);
+	memcpy(d + 0x4, s + 2, 2);		/* RR mode */
+	memcpy(d + 0x6, s, 2);
+	memcpy(d + 0x8, s + 4, 2);
+	s += 6;
+#define TAKE(dst, bytes) do {				\
+	if ((size_t)(e - s) < (size_t)(bytes))		\
+		return -EINVAL;				\
+	memcpy(d + (dst), s, (bytes));			\
+	s += (bytes);					\
+} while (0)
+	TAKE(0xa, 4 * n);				/* the taps' brightness values */
+	TAKE(0xbe, 4);
+	TAKE(0xc2, 2 * 16);
+	for (j = 0; j < 5; j++)
+		for (i = 0; i < n; i++)
+			TAKE(0xe2 + j * 4320 + i * 96, 96);
+	for (j = 0; j < 5; j++)
+		for (i = 0; i < n; i++)
+			TAKE(0x5542 + j * 4320 + i * 96, 96);
+	for (j = 0; j < 5; j++)
+		for (i = 0; i < n; i++)
+			TAKE(0xa9a2 + j * 1440 + i * 32, 32);
+	TAKE(0xc5c2, 2 * 3);
+	TAKE(0xc5ca, 4 * 20 * 10 * 21 * 11);
+	TAKE(0x397aa, 4 * 20 * 10 * 21 * 11);
+	TAKE(0x6698a, 2 * 21 * 11);
+	TAKE(0x66b58, 96 * n);
+	TAKE(0x67c38, 2);
+	if ((size_t)(e - s) < 2)
+		return -EINVAL;
+	q = get_unaligned_le16(s);
+	if (q > PANELCAL_IRDV_REPS)
+		return -EINVAL;
+	TAKE(0x67c3a, 2);
+	/* The file's first per-tap list is the struct's second */
+	for (i = 0; i < n; i++)
+		TAKE(0x67fc0 + i * 2 * PANELCAL_IRDV_REPS, 2 * q);
+	for (i = 0; i < n; i++)
+		TAKE(0x67c3c + i * 2 * PANELCAL_IRDV_REPS, 2 * q);
+	TAKE(0x68344, 4);
+	TAKE(0x68348, 2 * 21);
+	TAKE(0x68372, 2 * 4 * 64);
+	TAKE(0x68572, 2 * 5);
+#undef TAKE
+	return 0;
+}
+
+static int dcp_panelcal_vendor(struct apple_dcp *dcp)
+{
+	const struct firmware *fw;
+	const u8 *p, *end;
+	unsigned int sent = 0;
+	size_t off;
+	u8 hdr[20];
+	u8 *buf;
+	int ret;
+
+	ret = request_firmware(&fw, PANELCAL_FW_IRDC, dcp->dev);
+	if (ret)
+		return ret;
+	p = fw->data;
+	ret = -EINVAL;
+	if (fw->size < 24 || get_unaligned_le32(p) != PANELCAL_ADCL)
+		goto out;
+	end = p + min_t(size_t, fw->size, (size_t)get_unaligned_le32(p + 8) * 4);
+	buf = kvzalloc(PANELCAL_IRDV_BUF, GFP_KERNEL);
+	ret = -ENOMEM;
+	if (!buf)
+		goto out;
+	ret = 0;
+	for (off = 12; !ret && p + off + 12 <= end;) {
+		u32 tag = get_unaligned_le32(p + off);
+		u16 ver = get_unaligned_le16(p + off + 6);
+		size_t len = (size_t)get_unaligned_le32(p + off + 8) * 4;
+
+		if (len < 12 || len > (size_t)(end - (p + off)))
+			break;
+		if (tag == PANELCAL_IRDF && ver == 1) {
+			ret = panelcal_irdc_vendor(buf, p + off + 12, len - 12);
+			if (ret)
+				break;
+			panelcal_header(hdr, PANELCAL_IRDV_BUF);
+			ret = panelcal_send(dcp, PANELCAL_BLOCK_IRDC_VENDOR,
+					    "IRDC vendor data, RR mode", get_unaligned_le16(buf + 4),
+					    hdr, sizeof(hdr), buf, PANELCAL_IRDV_BUF);
+			sent += !ret;
+		}
+		off += len;
+	}
+	kvfree(buf);
+	dev_info(dcp->dev, "panel calibration: %u IRDC vendor blocks accepted, last result %d\n",
+		 sent, ret);
+out:
+	release_firmware(fw);
+	return ret;
 }
 
 static int dcp_panelcal_load(struct apple_dcp *dcp)
@@ -179,5 +298,8 @@ static int dcp_panelcal_load(struct apple_dcp *dcp)
 		 sent, ret);
 out:
 	release_firmware(fw);
+	/* Vendor data only behind the device data: the firmware compares the tap counts */
+	if (!ret)
+		ret = dcp_panelcal_vendor(dcp);
 	return ret;
 }

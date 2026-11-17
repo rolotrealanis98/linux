@@ -346,6 +346,44 @@ int asahi_sysfs_register_idle(struct device *dev, u32 *word)
 }
 EXPORT_SYMBOL_GPL(asahi_sysfs_register_idle);
 
+/*
+ * M5: the completion sweep switch (0/1): retire commands whose completion notification never
+ * came, as the stamps in memory show them finished. Off at boot (m5_completion_sweep).
+ */
+static u32 *asahi_sweep_word;
+
+static ssize_t completion_sweep_show(struct device *dev, struct device_attribute *attr, char *buf)
+{
+	return sysfs_emit(buf, "%u\n", READ_ONCE(*asahi_sweep_word));
+}
+
+static ssize_t completion_sweep_store(struct device *dev, struct device_attribute *attr,
+				      const char *buf, size_t count)
+{
+	u32 on;
+
+	if (kstrtou32(buf, 0, &on) || on > 1)
+		return -EINVAL;
+	WRITE_ONCE(*asahi_sweep_word, on);
+	return count;
+}
+
+static DEVICE_ATTR_RW(completion_sweep);
+
+int asahi_sysfs_register_sweep(struct device *dev, u32 *word)
+{
+	int ret;
+
+	if (!dev || !word)
+		return -ENODEV;
+	asahi_sweep_word = word;
+	ret = device_create_file(dev, &dev_attr_completion_sweep);
+	if (ret)
+		asahi_sweep_word = NULL;
+	return ret;
+}
+EXPORT_SYMBOL_GPL(asahi_sysfs_register_sweep);
+
 void asahi_sysfs_unregister(struct device *dev, void *handle)
 {
 	struct asahi_stats_attribute *stats = handle;
@@ -362,6 +400,10 @@ void asahi_sysfs_unregister(struct device *dev, void *handle)
 	if (asahi_idle_word) {
 		device_remove_file(dev, &dev_attr_idle_off_delay_ms);
 		asahi_idle_word = NULL;
+	}
+	if (asahi_sweep_word) {
+		device_remove_file(dev, &dev_attr_completion_sweep);
+		asahi_sweep_word = NULL;
 	}
 	kfree(stats);
 }

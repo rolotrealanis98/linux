@@ -599,6 +599,18 @@ impl AsahiPlatformDriver {
                 error
             );
         }
+        // M5 completion sweep: off through probe; on only now that the device is registered,
+        // if asked for on the command line. Userspace can switch it with the sysfs file.
+        crate::g17::COMPLETION_SWEEP.store(
+            module_parameters::m5_completion_sweep.value().min(1),
+            core::sync::atomic::Ordering::Relaxed,
+        );
+        if let Err(error) = crate::sysfs_exports::register_sweep(
+            raw_dev,
+            crate::g17::COMPLETION_SWEEP.as_ptr(),
+        ) {
+            dev_warn!(pdev.as_ref(), "completion_sweep not registered: {:?}\n", error);
+        }
         Ok(AsahiPlatformDriverData {
             binding,
             _device: reg.device().into(),

@@ -1,0 +1,12 @@
+# SPDX-License-Identifier: GPL-2.0-only
+config V4L2_LOOPBACK
+	tristate "v4l2loopback: virtual video loopback devices"
+	depends on VIDEO_DEV
+	help
+	  v4l2loopback (https://github.com/v4l2loopback/v4l2loopback, v0.15.4)
+	  creates virtual video devices: frames written to the output side of
+	  a device (e.g. by a camera pipeline) are read by applications from
+	  its capture side, as from a real camera.
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called v4l2loopback.

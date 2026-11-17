@@ -9,6 +9,7 @@
 #include <linux/rtnetlink.h>
 #include <linux/seq_file.h>
 #include <linux/uaccess.h>
+#include <linux/vmalloc.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <net/cfg80211.h>
@@ -68,6 +69,32 @@ struct aci_event_record {
 	u8 header[24];
 	u8 data[ACI_EVENT_BYTES];
 };
+
+/*
+ * aci_debug: management-ring packets that name interface 1 or 2 (AWDL/NAN
+ * action frames from peers). After the 24-byte header come 0x60 bytes of RX
+ * metadata, then the 802.11 frame.
+ */
+#define ACI_FRAME_LOG 64
+#define ACI_FRAME_BYTES (0x60 + 96)
+
+struct aci_frame_record {
+	u16 size;
+	u8 header[24];
+	u8 data[ACI_FRAME_BYTES];
+};
+
+/*
+ * Firmware halt capture (aci_debug). The control function's config space
+ * holds one crash-log table per subsystem (address and size at 0xf94/0xf98
+ * for 0, 0xf9c/0xfa0 for 1 = Wi-Fi, 0xfa4/0xfa8 for 2), in N1 memory that
+ * BAR4 shows 16 MB at a time once BAR0 offset 0 holds the window base:
+ * macOS 27.3 CentauriControl, GetCrashlogTableInfo and MemoryReadBAR4. A
+ * table is a 0x14-byte header and 0xc-byte entries (address, length, ...).
+ */
+#define HALT_CRASHLOG_MAX SZ_4M
+#define HALT_SEGMENT_MAX SZ_1M
+#define HALT_TABLE_MAX SZ_4K
 
 struct centauri_t6050_wifi {
 	struct centauri_t6050 *control;
@@ -149,6 +176,14 @@ struct centauri_t6050_wifi {
 	/* The last probe's result, for the next read of debugfs aci. */
 	u8 aci_result[8 + REPLY_SIZE];
 	size_t aci_result_size;
+	struct aci_frame_record aci_frames[ACI_FRAME_LOG];
+	unsigned int aci_frame_count;
+	/* What was saved when the firmware was found halted (aci_debug). */
+	bool halt_captured;
+	char halt_info[2048];
+	void *halt_crashlog, *halt_scratch;
+	struct debugfs_blob_wrapper halt_info_blob, halt_crashlog_blob;
+	struct debugfs_blob_wrapper halt_scratch_blob;
 };
 
 static int query_link_status(struct centauri_t6050_wifi *wifi);
@@ -732,10 +767,29 @@ static void aci_event_record(struct centauri_t6050_wifi *wifi, const u8 *packet,
 	wifi->aci_event_count++;
 }
 
+static void aci_frame_record(struct centauri_t6050_wifi *wifi, const u8 *packet,
+			     u16 size)
+{
+	struct aci_frame_record *f =
+		&wifi->aci_frames[wifi->aci_frame_count % ACI_FRAME_LOG];
+
+	f->size = size - 24;
+	memcpy(f->header, packet, 24);
+	memset(f->data, 0, sizeof(f->data));
+	memcpy(f->data, packet + 24, min_t(size_t, size - 24, sizeof(f->data)));
+	wifi->aci_frame_count++;
+}
+
+static void aci_halt_capture(struct centauri_t6050_wifi *wifi, const char *why);
+
 static void drain(struct centauri_t6050_wifi *wifi)
 {
 	unsigned int ring;
 	bool posted = false;
+
+	if (READ_ONCE(aci_debug) && !wifi->halt_captured &&
+	    readl(wifi->a.bar + 8) == 3)
+		aci_halt_capture(wifi, "ring drain");
 
 	for (ring = 2; ring <= 4; ring++) {
 		unsigned int budget = ring_size[ring];
@@ -761,7 +815,13 @@ static void drain(struct centauri_t6050_wifi *wifi)
 			if (size < 24 || size > BUFFER_SIZE)
 				goto refill;
 			if (ring == 4) {
-				report_beacon(wifi, packet + 24, size - 24);
+				if (READ_ONCE(aci_debug) &&
+				    packet[ACI_HDR_IFIDX] != ACI_IF_STATION)
+					aci_frame_record(wifi, packet, size);
+				if (packet[ACI_HDR_IFIDX] == ACI_IF_STATION ||
+				    !wifi->aci_other_if)
+					report_beacon(wifi, packet + 24,
+						      size - 24);
 			} else if (command & BIT(31)) {
 				if (READ_ONCE(aci_debug))
 					aci_event_record(wifi, packet, size,
@@ -899,6 +959,8 @@ static int command_reply(struct centauri_t6050_wifi *wifi, u32 id,
 			dev_err(&wifi->control->pdev->dev,
 				"Wi-Fi command %#x lost transport: stage=%#x sequence=%u rx=%u\n",
 				id, stage, sequence, wifi->rx_seen[2]);
+			if (stage == 3 && READ_ONCE(aci_debug))
+				aci_halt_capture(wifi, "lost transport");
 			command_fault(wifi);
 			ret = -EIO;
 			goto out;
@@ -2661,6 +2723,208 @@ out:
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(link_info);
+
+/*
+ * Read N1 memory through the control function's BAR4 window: BAR0 offset 0
+ * takes the 16 MB-aligned base (macOS reads it back to check). Only used
+ * after the firmware has halted.
+ */
+static int n1_memory_read(void __iomem *bar0, void __iomem *bar4, u32 address,
+			  void *dst, size_t length)
+{
+	while (length) {
+		u32 base = address & ~(SZ_16M - 1), offset = address - base;
+		size_t chunk = min_t(size_t, length, SZ_16M - offset);
+
+		writel(base, bar0);
+		if (readl(bar0) != base)
+			return -EIO;
+		memcpy_fromio(dst, bar4 + offset, chunk);
+		dst += chunk;
+		address += chunk;
+		length -= chunk;
+	}
+	return 0;
+}
+
+#define HALT_INFO(fmt, ...)                                                   \
+	(pos += scnprintf(wifi->halt_info + pos, sizeof(wifi->halt_info) - pos, \
+			  fmt, ##__VA_ARGS__))
+
+/*
+ * Caller holds wifi->lock. Once per firmware run, with aci_debug: save the
+ * Wi-Fi crash log (the subsystem 1 table and the segments it lists), the
+ * alpha scratch area the host gave the firmware, and a text summary, to
+ * debugfs halt_crashlog, halt_scratch and halt_info. Decoding against the
+ * firmware's assert database (ftab _wfa) is done in userspace
+ * (contrib/omarchy-mac/airdrop/n1-crashlog.py).
+ */
+static void aci_halt_capture(struct centauri_t6050_wifi *wifi, const char *why)
+{
+	struct pci_dev *pdev = wifi->control->pdev;
+	void __iomem *bar0 = wifi->control->bar, *bar4 = NULL;
+	u32 table_addr[3] = {}, table_size[3] = {}, saved_base = 0;
+	const u8 *wifi_table = NULL;
+	size_t used = 0;
+	int pos = 0, i, ret;
+	u8 *log;
+
+	if (wifi->halt_captured)
+		return;
+	wifi->halt_captured = true;
+	HALT_INFO("halt: alpha stage %#x control stage %#x, noticed by %s\n",
+		  readl(wifi->a.bar + 8), readl(bar0 + 0x8000), why);
+	for (i = 0; i < 3; i++) {
+		pci_read_config_dword(pdev, 0xf94 + 8 * i, &table_addr[i]);
+		pci_read_config_dword(pdev, 0xf98 + 8 * i, &table_size[i]);
+		HALT_INFO("crashlog table %d: %#x + %#x\n", i, table_addr[i],
+			  table_size[i]);
+	}
+
+	wifi->halt_scratch = vmalloc(CEN_ALPHA_SCRATCH_SIZE);
+	if (wifi->halt_scratch) {
+		memcpy(wifi->halt_scratch,
+		       wifi->a.window + CEN_ALPHA_SCRATCH_OFFSET,
+		       CEN_ALPHA_SCRATCH_SIZE);
+		wifi->halt_scratch_blob.data = wifi->halt_scratch;
+		wifi->halt_scratch_blob.size = CEN_ALPHA_SCRATCH_SIZE;
+	}
+
+	log = vzalloc(HALT_CRASHLOG_MAX);
+	if (pci_resource_len(pdev, 4) >= SZ_16M)
+		bar4 = pci_iomap_range(pdev, 4, 0, SZ_16M);
+	if (!log || !bar4) {
+		HALT_INFO("crashlog: no buffer or no BAR4 mapping\n");
+		goto out;
+	}
+	saved_base = readl(bar0);
+	/*
+	 * Records: le32 address, le32 length, then the bytes. The tables come
+	 * first (all three), then each Wi-Fi segment the Wi-Fi table lists.
+	 */
+	for (i = 0; i < 3; i++) {
+		u32 size = table_size[i];
+
+		if (!table_addr[i] || size < 0x14 || size > HALT_TABLE_MAX ||
+		    used + 8 + size > HALT_CRASHLOG_MAX)
+			continue;
+		put_unaligned_le32(table_addr[i], log + used);
+		put_unaligned_le32(size, log + used + 4);
+		ret = n1_memory_read(bar0, bar4, table_addr[i], log + used + 8,
+				     size);
+		if (ret) {
+			HALT_INFO("table %d: window did not take: %d\n", i, ret);
+			continue;
+		}
+		if (i == 1) {
+			const u8 *table = log + used + 8;
+
+			wifi_table = table;
+			u32 entries = (size - 0x14) / 0xc;
+
+			HALT_INFO("wifi table header %*phN\n", 0x14, table);
+			for (u32 e = 0; e < entries; e++) {
+				u32 a = get_unaligned_le32(table + 0x14 + e * 0xc);
+				u32 l = get_unaligned_le32(table + 0x18 + e * 0xc);
+				u32 x = get_unaligned_le32(table + 0x1c + e * 0xc);
+
+				HALT_INFO("wifi segment %u: %#x + %#x (%#x)\n",
+					  e, a, l, x);
+			}
+		}
+		used += 8 + size;
+	}
+	if (wifi_table) {
+		u32 entries = (table_size[1] - 0x14) / 0xc;
+
+		for (u32 e = 0; e < entries; e++) {
+			u32 a = get_unaligned_le32(wifi_table + 0x14 + e * 0xc);
+			u32 l = get_unaligned_le32(wifi_table + 0x18 + e * 0xc);
+
+			if (!a || !l || l > HALT_SEGMENT_MAX ||
+			    used + 8 + l > HALT_CRASHLOG_MAX)
+				continue;
+			put_unaligned_le32(a, log + used);
+			put_unaligned_le32(l, log + used + 4);
+			if (n1_memory_read(bar0, bar4, a, log + used + 8, l))
+				continue;
+			used += 8 + l;
+		}
+	}
+	writel(saved_base, bar0);
+	HALT_INFO("crashlog: %zu bytes saved\n", used);
+out:
+	if (bar4)
+		pci_iounmap(pdev, bar4);
+	if (log && used) {
+		wifi->halt_crashlog = log;
+		wifi->halt_crashlog_blob.data = log;
+		wifi->halt_crashlog_blob.size = used;
+	} else {
+		vfree(log);
+	}
+	wifi->halt_info_blob.data = wifi->halt_info;
+	wifi->halt_info_blob.size = pos;
+	dev_err(&pdev->dev,
+		"Wi-Fi firmware halted (%s): crash log %zu bytes, scratch %s; debugfs halt_info, halt_crashlog, halt_scratch\n",
+		why, used, wifi->halt_scratch ? "saved" : "not saved");
+}
+
+/* Reading halt_check looks at the alpha stage and captures a halt now. */
+static ssize_t halt_check_read(struct file *file, char __user *ubuf,
+			       size_t count, loff_t *ppos)
+{
+	struct centauri_t6050_wifi *wifi = file->private_data;
+	char text[48];
+	u32 stage;
+	int len;
+
+	mutex_lock(&wifi->lock);
+	stage = readl(wifi->a.bar + 8);
+	if (stage == 3 && READ_ONCE(aci_debug))
+		aci_halt_capture(wifi, "halt_check");
+	len = scnprintf(text, sizeof(text), "stage %#x captured %d\n", stage,
+			wifi->halt_captured);
+	mutex_unlock(&wifi->lock);
+	return simple_read_from_buffer(ubuf, count, ppos, text, len);
+}
+
+static const struct file_operations halt_check_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = halt_check_read,
+	.llseek = default_llseek,
+};
+
+/* One line per management-ring packet for interface 1 or 2, oldest first. */
+static int aci_frames_show(struct seq_file *s, void *unused)
+{
+	struct centauri_t6050_wifi *wifi = s->private;
+	unsigned int n, first;
+
+	mutex_lock(&wifi->lock);
+	n = min_t(unsigned int, wifi->aci_frame_count, ACI_FRAME_LOG);
+	first = wifi->aci_frame_count - n;
+	for (unsigned int i = first; i < wifi->aci_frame_count; i++) {
+		const struct aci_frame_record *f =
+			&wifi->aci_frames[i % ACI_FRAME_LOG];
+
+		size_t frame = f->size > 0x60 ? f->size - 0x60 : 0;
+
+		/* %ph prints at most 64 bytes: the frame twice, 64 + 32. */
+		seq_printf(s, "%u if=%u size=%u hdr=%*phN meta=%*phN frame=%*phN",
+			   i, f->header[ACI_HDR_IFIDX], f->size, 24, f->header,
+			   32, f->data, (int)min_t(size_t, frame, 64),
+			   f->data + 0x60);
+		seq_printf(s, "%*phN\n",
+			   (int)(frame > 64 ? min_t(size_t, frame - 64, 32) : 0),
+			   f->data + 0x60 + 64);
+	}
+	mutex_unlock(&wifi->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(aci_frames);
+
 /*
  * What the ACI probe may send. Interface 0 (the station that carries the
  * owner's network) only gets read-only queries. Interfaces 1 (AWDL) and 2
@@ -2871,6 +3135,16 @@ int centauri_t6050_wifi_register(struct centauri_t6050 *c)
 			    &aci_fops);
 	debugfs_create_file("aci_events", 0400, wifi->wiphy->debugfsdir, wifi,
 			    &aci_events_fops);
+	debugfs_create_file("aci_frames", 0400, wifi->wiphy->debugfsdir, wifi,
+			    &aci_frames_fops);
+	debugfs_create_file("halt_check", 0400, wifi->wiphy->debugfsdir, wifi,
+			    &halt_check_fops);
+	debugfs_create_blob("halt_info", 0400, wifi->wiphy->debugfsdir,
+			    &wifi->halt_info_blob);
+	debugfs_create_blob("halt_crashlog", 0400, wifi->wiphy->debugfsdir,
+			    &wifi->halt_crashlog_blob);
+	debugfs_create_blob("halt_scratch", 0400, wifi->wiphy->debugfsdir,
+			    &wifi->halt_scratch_blob);
 	rtnl_lock();
 	channels_apply(wifi);
 	rtnl_unlock();
@@ -2926,6 +3200,8 @@ void centauri_t6050_wifi_unregister(struct centauri_t6050 *c)
 		wiphy_free(wifi->wiphy);
 	if (wifi->netdev)
 		free_netdev(wifi->netdev);
+	vfree(wifi->halt_crashlog);
+	vfree(wifi->halt_scratch);
 	memzero_explicit(wifi, sizeof(*wifi));
 	kfree(wifi);
 }

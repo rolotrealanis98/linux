@@ -418,10 +418,10 @@
  * Pin 112 takes an SError when read (as on the J716c), so only the pins a node
  * here names are exposed: 80 (PCIe port 0's PERST#), 106 and 107 (the speaker
  * amps' interrupt and shutdown line), 134 and 139 (the jack codec's interrupt
- * and reset).
+ * and reset), 138 (the Touch ID sensor's data-ready line, as on the J714s).
  */
 &pinctrl_ap {
-	gpio-reserved-ranges = <0 80>, <81 25>, <108 26>, <135 4>, <140 81>;
+	gpio-reserved-ranges = <0 80>, <81 25>, <108 26>, <135 3>, <140 81>;
 };
 
 /*

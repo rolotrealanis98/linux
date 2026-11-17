@@ -3713,6 +3713,7 @@ static int apple_cio_tbt_switch_set(struct typec_thunderbolt_switch_dev *sw,
 		return ret;
 	}
 
+	dev_info(acio->dev, "USB4/Thunderbolt partner gone: removing the domain, router off\n");
 	apple_cio_stop(acio);
 	return 0;
 }
@@ -4086,6 +4087,8 @@ static int apple_cio_probe(struct platform_device *pdev)
 
 	acio->pm_notifier.notifier_call = apple_cio_pm_notify;
 	register_pm_notifier(&acio->pm_notifier);
+	/* No domain exists until then: an empty /sys/bus/thunderbolt is the idle state. */
+	dev_info(dev, "router off until a USB4/Thunderbolt partner is attached\n");
 	return 0;
 }
 

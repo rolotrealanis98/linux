@@ -8,6 +8,7 @@
 #include <linux/module.h>
 #include <linux/rtnetlink.h>
 #include <linux/seq_file.h>
+#include <linux/uaccess.h>
 #include <linux/unaligned.h>
 #include <linux/workqueue.h>
 #include <net/cfg80211.h>
@@ -41,6 +42,32 @@ static bool host_setup = true;
 module_param(host_setup, bool, 0644);
 MODULE_PARM_DESC(host_setup,
 		 "Before a join, tell the firmware the host is awake (command 6) and apply the reference TX defaults (commands 43 and 52); 1 = on (default)");
+
+/*
+ * ACI probe (AirDrop research, contrib/omarchy-mac/airdrop): a root-only
+ * debugfs file that sends one firmware command on interface 1 (AWDL) or
+ * 2 (NAN), or a read-only query on interface 0, and returns the reply.
+ * Off by default; root can switch it on at run time through
+ * /sys/module/apple_centauri_t6050/parameters/aci_debug.
+ */
+static bool aci_debug;
+module_param(aci_debug, bool, 0644);
+MODULE_PARM_DESC(aci_debug,
+		 "Allow the debugfs aci firmware command probe (AWDL/NAN interfaces) and log events to aci_events; 0 = off (default)");
+
+/* The ACI header: interface index at 0x0d (macOS 27.3 WLANACIAdapter: station 0, AWDL 1, NAN 2). */
+#define ACI_HDR_IFIDX 0x0d
+#define ACI_IF_STATION 0
+#define ACI_IF_MAX 2
+#define ACI_EVENT_LOG 32
+#define ACI_EVENT_BYTES 64
+
+struct aci_event_record {
+	u32 id;
+	u16 status, size;
+	u8 header[24];
+	u8 data[ACI_EVENT_BYTES];
+};
 
 struct centauri_t6050_wifi {
 	struct centauri_t6050 *control;
@@ -113,6 +140,15 @@ struct centauri_t6050_wifi {
 	u8 avoid_ssid[IEEE80211_MAX_SSID_LEN];
 	size_t avoid_ssid_len;
 	unsigned long avoid_until;
+	/* ACI probe (aci_debug): the interface the next command goes to. */
+	u8 command_ifidx;
+	/* A command went to interface 1 or 2: events may now be theirs. */
+	bool aci_other_if;
+	struct aci_event_record aci_events[ACI_EVENT_LOG];
+	unsigned int aci_event_count;
+	/* The last probe's result, for the next read of debugfs aci. */
+	u8 aci_result[8 + REPLY_SIZE];
+	size_t aci_result_size;
 };
 
 static int query_link_status(struct centauri_t6050_wifi *wifi);
@@ -680,6 +716,22 @@ static void link_info_log(struct centauri_t6050_wifi *wifi)
 	dev_info(&wifi->control->pdev->dev, "Wi-Fi link: %s\n", line);
 }
 
+/* aci_debug: keep the last ACI_EVENT_LOG firmware events, header included. */
+static void aci_event_record(struct centauri_t6050_wifi *wifi, const u8 *packet,
+			     u16 size, u32 command, u16 status)
+{
+	struct aci_event_record *e =
+		&wifi->aci_events[wifi->aci_event_count % ACI_EVENT_LOG];
+
+	e->id = command;
+	e->status = status;
+	e->size = size - 24;
+	memcpy(e->header, packet, 24);
+	memset(e->data, 0, sizeof(e->data));
+	memcpy(e->data, packet + 24, min_t(size_t, size - 24, sizeof(e->data)));
+	wifi->aci_event_count++;
+}
+
 static void drain(struct centauri_t6050_wifi *wifi)
 {
 	unsigned int ring;
@@ -711,6 +763,17 @@ static void drain(struct centauri_t6050_wifi *wifi)
 			if (ring == 4) {
 				report_beacon(wifi, packet + 24, size - 24);
 			} else if (command & BIT(31)) {
+				if (READ_ONCE(aci_debug))
+					aci_event_record(wifi, packet, size,
+							 command, status);
+				/*
+				 * Once the probe has used interface 1 or 2,
+				 * an event naming another interface is not
+				 * the station's.
+				 */
+				if (wifi->aci_other_if &&
+				    packet[ACI_HDR_IFIDX] != ACI_IF_STATION)
+					goto refill;
 				if (command == 0x80000030)
 					wifi->channels_seen++;
 				if (command == 0x80000005) {
@@ -805,6 +868,7 @@ static int command_reply(struct centauri_t6050_wifi *wifi, u32 id,
 	put_unaligned_le16(24 + size, packet + 0x10);
 	put_unaligned_le16(sequence, packet + 0x12);
 	put_unaligned_le32(id, packet + 0x14);
+	packet[ACI_HDR_IFIDX] = wifi->command_ifidx;
 	if (size)
 		memcpy(packet + 24, payload, size);
 	descriptor = wifi->a.window + TR_BASE + slot * 16;
@@ -2597,6 +2661,132 @@ out:
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(link_info);
+/*
+ * What the ACI probe may send. Interface 0 (the station that carries the
+ * owner's network) only gets read-only queries. Interfaces 1 (AWDL) and 2
+ * (NAN) get their own system commands (configure 1, start 2, stop 3,
+ * system capabilities 8 (macOS reads the AWDL defaults this way), set and
+ * get interface configuration 12 and 13, interface status 20) and
+ * their command groups (5 AWDL, 9 NAN). Connect (2), security (3), scan
+ * (1), monitor mode (system 54, 55, 66) and power commands stay refused.
+ */
+static bool aci_allowed(u8 ifidx, u32 id)
+{
+	u16 group = id >> 16, op = id & 0xffff;
+
+	if (ifidx == ACI_IF_STATION)
+		return group == 0 && (op == 0 || op == 8 || op == 10 ||
+				      op == 13 || op == 18 || op == 19 ||
+				      op == 20 || op == 50);
+	if (ifidx > ACI_IF_MAX)
+		return false;
+	if (group == 0)
+		return op == 1 || op == 2 || op == 3 || op == 8 || op == 12 ||
+		       op == 13 || op == 20;
+	return (ifidx == 1 && group == 5) || (ifidx == 2 && group == 9);
+}
+
+/*
+ * Write: u8 interface, u8 0, u16 0, le32 command, payload. The command runs
+ * at once. Read: le32 result (0 or -errno), le16 firmware status, le16
+ * reply length, reply.
+ */
+static ssize_t aci_write(struct file *file, const char __user *ubuf,
+			 size_t count, loff_t *ppos)
+{
+	struct centauri_t6050_wifi *wifi = file->private_data;
+	u8 *buf;
+	size_t reply_size = REPLY_SIZE;
+	u32 id;
+	u8 ifidx;
+	int ret;
+
+	if (!READ_ONCE(aci_debug))
+		return -EPERM;
+	if (count < 8 || count > 8 + REPLY_SIZE)
+		return -EINVAL;
+	buf = memdup_user(ubuf, count);
+	if (IS_ERR(buf))
+		return PTR_ERR(buf);
+	ifidx = buf[0];
+	id = get_unaligned_le32(buf + 4);
+	if (buf[1] || buf[2] || buf[3] || (id & BIT(31)) ||
+	    !aci_allowed(ifidx, id)) {
+		kfree(buf);
+		return -EPERM;
+	}
+	mutex_lock(&wifi->lock);
+	if (READ_ONCE(wifi->stopping) || wifi->command_failed ||
+	    !wifi->configured) {
+		ret = -ENETDOWN;
+		reply_size = 0;
+	} else {
+		if (ifidx != ACI_IF_STATION)
+			wifi->aci_other_if = true;
+		wifi->command_ifidx = ifidx;
+		ret = command_reply(wifi, id, buf + 8, count - 8,
+				    wifi->aci_result + 8, &reply_size);
+		wifi->command_ifidx = ACI_IF_STATION;
+		if (ret && ret != -EREMOTEIO)
+			reply_size = 0;
+	}
+	reply_size = min_t(size_t, reply_size, REPLY_SIZE);
+	put_unaligned_le32((u32)ret, wifi->aci_result);
+	put_unaligned_le16(ret ? wifi->reply_status : 0, wifi->aci_result + 4);
+	put_unaligned_le16(reply_size, wifi->aci_result + 6);
+	wifi->aci_result_size = 8 + reply_size;
+	dev_info(&wifi->control->pdev->dev,
+		 "ACI probe: interface %u command %#x: %d (firmware status %u, %zu reply bytes)\n",
+		 ifidx, id, ret, ret ? wifi->reply_status : 0, reply_size);
+	mutex_unlock(&wifi->lock);
+	kfree(buf);
+	return count;
+}
+
+static ssize_t aci_read(struct file *file, char __user *ubuf, size_t count,
+			loff_t *ppos)
+{
+	struct centauri_t6050_wifi *wifi = file->private_data;
+	ssize_t ret;
+
+	mutex_lock(&wifi->lock);
+	ret = simple_read_from_buffer(ubuf, count, ppos, wifi->aci_result,
+				      wifi->aci_result_size);
+	mutex_unlock(&wifi->lock);
+	return ret;
+}
+
+static const struct file_operations aci_fops = {
+	.owner = THIS_MODULE,
+	.open = simple_open,
+	.read = aci_read,
+	.write = aci_write,
+	.llseek = default_llseek,
+};
+
+/* One line per event, oldest first: count, id, status, size, header, data. */
+static int aci_events_show(struct seq_file *s, void *unused)
+{
+	struct centauri_t6050_wifi *wifi = s->private;
+	unsigned int n, first;
+
+	mutex_lock(&wifi->lock);
+	n = min_t(unsigned int, wifi->aci_event_count, ACI_EVENT_LOG);
+	first = wifi->aci_event_count - n;
+	for (unsigned int i = first; i < wifi->aci_event_count; i++) {
+		const struct aci_event_record *e =
+			&wifi->aci_events[i % ACI_EVENT_LOG];
+
+		seq_printf(s, "%u id=%#010x if=%u status=%u size=%u hdr=%*phN data=%*phN\n",
+			   i, e->id, e->header[ACI_HDR_IFIDX], e->status,
+			   e->size, 24, e->header,
+			   (int)min_t(size_t, e->size, ACI_EVENT_BYTES),
+			   e->data);
+	}
+	mutex_unlock(&wifi->lock);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(aci_events);
 
 int centauri_t6050_wifi_register(struct centauri_t6050 *c)
 {
@@ -2677,6 +2867,10 @@ int centauri_t6050_wifi_register(struct centauri_t6050 *c)
 			    &wifi->link_status_blob);
 	debugfs_create_file("link_info", 0400, wifi->wiphy->debugfsdir, wifi,
 			    &link_info_fops);
+	debugfs_create_file("aci", 0600, wifi->wiphy->debugfsdir, wifi,
+			    &aci_fops);
+	debugfs_create_file("aci_events", 0400, wifi->wiphy->debugfsdir, wifi,
+			    &aci_events_fops);
 	rtnl_lock();
 	channels_apply(wifi);
 	rtnl_unlock();

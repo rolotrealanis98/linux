@@ -75,10 +75,13 @@ static const struct mfd_cell apple_smc_t6050_devs[] = {
 /*
  * Cells registered only where the device tree describes them: the MFD core would otherwise
  * create an unbound device and warn that it found no node on every SMC without one. The pcIO
- * outputs and the second GPIO bank ('gp' keys) only exist on some SMCs.
+ * outputs and the second GPIO bank ('gp' keys) only exist on some SMCs. The pcIO outputs have
+ * a name of their own: a board that also describes the 'gP' bank (the J716s) would otherwise
+ * register two "macsmc-gpio" devices, and the second fails the SMC's probe. gpio-macsmc binds
+ * them by compatible either way.
  */
 static const struct mfd_cell apple_smc_described_devs[] = {
-	MFD_CELL_OF("macsmc-gpio", NULL, NULL, 0, 0, "apple,smc-pcio-gpio"),
+	MFD_CELL_OF("macsmc-pcio-gpio", NULL, NULL, 0, 0, "apple,smc-pcio-gpio"),
 	MFD_CELL_OF("macsmc-low-gpio", NULL, NULL, 0, 0, "apple,smc-low-gpio"),
 };
 

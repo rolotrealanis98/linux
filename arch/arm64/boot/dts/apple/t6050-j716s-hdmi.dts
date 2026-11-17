@@ -1,0 +1,10 @@
+// SPDX-License-Identifier: GPL-2.0+ OR MIT
+/*
+ * MacBook Pro (16-inch, M5 Pro, 2026) with the HDMI port described (t6050-j716s-hdmi.dtsi), for
+ * testing it. Everything else is t6050-j716s.dts.
+ *
+ * Copyright The Asahi Linux Contributors
+ */
+
+#include "t6050-j716s.dts"
+#include "t6050-j716s-hdmi.dtsi"

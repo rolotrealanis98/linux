@@ -587,12 +587,19 @@ static int t6050_sleep_pmu_xfer(struct apple_sleep *s, u8 opcode, u16 address,
 }
 
 /*
- * Carried until the entry takes a sleep without one: with this set (the default), no armed RTC
- * alarm is no refusal. The SMC's wake sources (lid, keys, power button) do not need the alarm;
- * it is then neither checked against the sleep timer nor rearmed after the commit.
+ * Carried until the entry takes a sleep without one: with this set, no armed RTC alarm is no
+ * refusal. The SMC's wake sources (lid, keys, power button) do not need the alarm; it is then
+ * neither checked against the sleep timer nor rearmed after the commit.
+ *
+ * Off by default: a deep sleep is refused unless an RTC alarm is armed, so nothing can sleep
+ * without a wake that does not depend on the SMC's sources. Until a board has shown that its
+ * lid, keys and power button wake it, the alarm is the only wake known to work. Set it at
+ * runtime (/sys/module/apple_sleep/parameters/t6050_alarm_optional) once they have.
  */
-static bool t6050_alarm_optional = true;
+static bool t6050_alarm_optional;
 module_param(t6050_alarm_optional, bool, 0644);
+MODULE_PARM_DESC(t6050_alarm_optional,
+		 "Take a deep sleep with no RTC alarm armed (wake by lid, keys or power button only)");
 
 /* Before the shared last-stop/enclave boundary: failure must leave ANS running. */
 static int t6050_sleep_check_alarm(struct apple_sleep *s)

@@ -5366,14 +5366,14 @@ static int dcp_get_disp_regs(struct apple_dcp *dcp)
 #define DCP_FW_VERSION_MAX_LEN	5
 #define DCP_FW_VERSION_STR_LEN	(DCP_FW_VERSION_MAX_LEN * 4)
 
-static int dcp_read_fw_version(struct device *dev, const char *name,
-			       char *version_str)
+static int dcp_read_fw_version_np(struct device *dev, struct device_node *np,
+				  const char *name, char *version_str)
 {
 	u32 ver[DCP_FW_VERSION_MAX_LEN];
 	int len_str;
 	int len;
 
-	len = of_property_read_variable_u32_array(dev->of_node, name, ver,
+	len = of_property_read_variable_u32_array(np, name, ver,
 						  DCP_FW_VERSION_MIN_LEN,
 						  DCP_FW_VERSION_MAX_LEN);
 
@@ -5406,6 +5406,55 @@ static int dcp_read_fw_version(struct device *dev, const char *name,
 	return len;
 }
 
+static int dcp_read_fw_version(struct device *dev, const char *name,
+			       char *version_str)
+{
+	return dcp_read_fw_version_np(dev, dev->of_node, name, version_str);
+}
+
+/*
+ * The firmware-compat that numbers a firmware 27 processor's IOMFB methods. A T6050
+ * external engine the boot loader hands over (aura t6050_ext_one()) gets the OS
+ * firmware's version as its compat, which on the J716s's 27.3 beta is its iBoot's
+ * 27.2.98.1: no table has that number, and the engine would not start. It runs the
+ * internal display's image (the loader hands it over only with the same uuid), so when
+ * its own compat has no table it takes the internal processor's, if that one names the
+ * same image and has a table. Anything else reads as before.
+ */
+static int dcp_v27_compat(struct device *dev, char *compat_str)
+{
+	char main_compat[DCP_FW_VERSION_STR_LEN];
+	const char *uuid, *main_uuid;
+	struct device_node *main_np;
+	int ret, main_ret;
+
+	ret = dcp_read_fw_version(dev, "apple,firmware-compat", compat_str);
+	if ((ret >= 0 && iomfb_v27_methods(compat_str)) ||
+	    !of_device_is_compatible(dev->of_node, "apple,t6050-dcpext") ||
+	    of_property_read_string(dev->of_node, "apple,firmware-uuid", &uuid))
+		return ret;
+
+	main_np = of_find_compatible_node(NULL, NULL, "apple,t6050-dcp");
+	if (!main_np)
+		return ret;
+	if (!of_device_is_available(main_np) ||
+	    of_property_read_string(main_np, "apple,firmware-uuid", &main_uuid) ||
+	    strcmp(uuid, main_uuid)) {
+		of_node_put(main_np);
+		return ret;
+	}
+	main_ret = dcp_read_fw_version_np(dev, main_np, "apple,firmware-compat",
+					  main_compat);
+	of_node_put(main_np);
+	if (main_ret < 0 || !iomfb_v27_methods(main_compat))
+		return ret;
+
+	dev_info(dev, "firmware-compat %s has no 27.x method table: the internal display's %s (same image %s)\n",
+		 ret < 0 ? "missing" : compat_str, main_compat, uuid);
+	strscpy(compat_str, main_compat, DCP_FW_VERSION_STR_LEN);
+	return main_ret;
+}
+
 static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
 {
 	const struct apple_dcp_hw_data *hw = of_device_get_match_data(dev);
@@ -5429,7 +5478,7 @@ static enum dcp_firmware_version dcp_check_firmware_version(struct device *dev)
 	}
 
 	if (hw->firmware_compat == DCP_FIRMWARE_V_27_0) {
-		ret = dcp_read_fw_version(dev, "apple,firmware-compat", compat_str);
+		ret = dcp_v27_compat(dev, compat_str);
 		if (ret < 0 || !iomfb_v27_methods(compat_str)) {
 			dev_err(dev, "DCP firmware-compat %s has no 27.x method table\n",
 				ret < 0 ? "missing" : compat_str);
@@ -6574,7 +6623,7 @@ static int dcp_platform_probe_pipe(struct platform_device *pdev)
 		char compat_str[DCP_FW_VERSION_STR_LEN];
 
 		/* Checked by dcp_check_firmware_version(). */
-		dcp_read_fw_version(dev, "apple,firmware-compat", compat_str);
+		dcp_v27_compat(dev, compat_str);
 		dcp->v27_methods = iomfb_v27_methods(compat_str);
 		if (dcp->v27_j714s) {
 			const struct dcp_method_entry *own =

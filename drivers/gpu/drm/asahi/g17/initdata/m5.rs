@@ -266,15 +266,15 @@ impl InitData {
         let views = m::PrimaryRegionViews {
             sentinel_high: BASE + 0xc07e_0000, alias_high: [PB, UMA],
         };
-        m::encode_m5_hw_data(board, completions, QOS, windows,
+        m::encode_m5_hw_data_for_layout(layout, board, completions, QOS, windows,
             &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE]).map_err(|_| EINVAL)?;
-        m::set_m5_kick_shared(board,
+        m::set_m5_kick_shared_for_layout(layout, board,
             &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE], KICK_SHARED)
             .map_err(|_| EINVAL)?;
         let masked_cores: u32 = id.core_masks.iter().map(|mask| mask.count_ones()).sum();
         let enabled_cores = if masked_cores != 0 { masked_cores }
             else { id.num_clusters.checked_mul(id.num_cores).ok_or(EOVERFLOW)? };
-        m::set_m5_enabled_cores(board,
+        m::set_m5_enabled_cores_for_layout(layout, board,
             &mut self.object_mut(self.bundle)?.bytes_mut()[..m::M5_HW_DATA_SIZE], enabled_cores)
             .map_err(|_| EINVAL)?;
         let bindings = m::M5PolicyBindings {

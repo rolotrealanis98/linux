@@ -42,6 +42,11 @@ pub(crate) enum RootProfile {
     /// policy and status config ([`ABI_ALLOCATION_SIZES_26B123_M5`]).
     J714G17S26B123,
 
+    /// The M5 graph of the macOS 27.3 beta 1 firmware (26C5035r): the 26B123 graph with one more
+    /// HW data word ([`M5_26C5035_HW_DATA_BANDS`]). It takes the same interface version word as
+    /// 26B123's, so only the firmware's identity tells them apart.
+    J714G17S26C5035,
+
     /// The common interface of macOS 27.2 (26B123, RTKit 3514.41.1): the
     /// [`Self::J873G18G26A428`] graph with a longer policy and status config
     /// ([`COMMON26B123_LAYOUTS`]). The J813's G17G build runs it as the J873's G18G one does.
@@ -55,6 +60,7 @@ impl RootProfile {
         match layouts {
             M5Layouts::V26A428 => Self::J714G17S26A428,
             M5Layouts::V26B123 => Self::J714G17S26B123,
+            M5Layouts::V26C5035 => Self::J714G17S26C5035,
         }
     }
 
@@ -63,6 +69,7 @@ impl RootProfile {
         match self {
             Self::J714G17S26A428 => Some(&M5_LAYOUT_26A428),
             Self::J714G17S26B123 => Some(&M5_LAYOUT_26B123),
+            Self::J714G17S26C5035 => Some(&M5_LAYOUT_26C5035),
             Self::J700G17P
             | Self::J813G17G25G76
             | Self::J873G18G26A428
@@ -77,7 +84,7 @@ impl RootProfile {
             Self::J873G18G26A428 => COMMON26_INITDATA_VERSION_WORD,
             Self::J873G18G26B123 => COMMON26B123_INITDATA_VERSION_WORD,
             Self::J714G17S26A428 => M5_INITDATA_VERSION_WORD,
-            Self::J714G17S26B123 => M5_26B123_INITDATA_VERSION_WORD,
+            Self::J714G17S26B123 | Self::J714G17S26C5035 => M5_26B123_INITDATA_VERSION_WORD,
         }
     }
 
@@ -94,14 +101,15 @@ impl RootProfile {
             Self::J700G17P
             | Self::J813G17G25G76
             | Self::J714G17S26A428
-            | Self::J714G17S26B123 => None,
+            | Self::J714G17S26B123
+            | Self::J714G17S26C5035 => None,
         }
     }
 
     pub(crate) const fn root_size(self, role: InstanceRole) -> usize {
         match self {
             Self::J873G18G26A428 | Self::J873G18G26B123 => COMMON26_ROOT_SIZE,
-            Self::J714G17S26A428 | Self::J714G17S26B123 => M5_ROOT_SIZE,
+            Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035 => M5_ROOT_SIZE,
             Self::J700G17P | Self::J813G17G25G76 => root_size(role),
         }
     }
@@ -114,12 +122,14 @@ impl RootProfile {
             (Self::J873G18G26A428 | Self::J873G18G26B123, InstanceRole::Secondary) => {
                 COMMON26_CONTROL_OPENING_OPCODE_SECONDARY
             }
-            (Self::J714G17S26A428 | Self::J714G17S26B123, InstanceRole::Primary) => {
-                M5_CONTROL_OPENING_OPCODE_PRIMARY
-            }
-            (Self::J714G17S26A428 | Self::J714G17S26B123, InstanceRole::Secondary) => {
-                M5_CONTROL_OPENING_OPCODE_SECONDARY
-            }
+            (
+                Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035,
+                InstanceRole::Primary,
+            ) => M5_CONTROL_OPENING_OPCODE_PRIMARY,
+            (
+                Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035,
+                InstanceRole::Secondary,
+            ) => M5_CONTROL_OPENING_OPCODE_SECONDARY,
             (_, InstanceRole::Primary) => CONTROL_OPENING_OPCODE_PRIMARY,
             (_, InstanceRole::Secondary) => CONTROL_OPENING_OPCODE_SECONDARY,
         }
@@ -130,7 +140,8 @@ impl RootProfile {
             Self::J873G18G26A428
             | Self::J873G18G26B123
             | Self::J714G17S26A428
-            | Self::J714G17S26B123 => None,
+            | Self::J714G17S26B123
+            | Self::J714G17S26C5035 => None,
             Self::J700G17P | Self::J813G17G25G76 => Some(CONTROL_OPENING_PRIMARY_REGISTER_OPCODE),
         }
     }
@@ -161,9 +172,8 @@ impl RootProfile {
     pub(crate) const fn region_view_low_addrs(self) -> [u64; 2] {
         match self {
             Self::J873G18G26A428 | Self::J873G18G26B123 => COMMON26_REGION_VIEW_LOW_ADDRS,
-            Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J700G17P | Self::J813G17G25G76 => {
-                REGION_VIEW_LOW_ADDRS
-            }
+            Self::J714G17S26A428 | Self::J714G17S26B123 | Self::J714G17S26C5035
+            | Self::J700G17P | Self::J813G17G25G76 => REGION_VIEW_LOW_ADDRS,
         }
     }
 
@@ -193,6 +203,7 @@ impl RootProfile {
     pub(crate) const fn m5_status_config(self) -> &'static M5StatusConfigMap {
         match self {
             Self::J714G17S26B123 => &M5_26B123_STATUS_CONFIG,
+            Self::J714G17S26C5035 => &M5_26B123_STATUS_CONFIG,
             Self::J714G17S26A428
             | Self::J700G17P
             | Self::J813G17G25G76
@@ -960,7 +971,8 @@ pub(crate) fn encode_main_config_for_profile(
                 RootProfile::J873G18G26A428
                 | RootProfile::J873G18G26B123
                 | RootProfile::J714G17S26A428
-                | RootProfile::J714G17S26B123 => COMMON26_MAIN_SECONDARY_KIND,
+                | RootProfile::J714G17S26B123
+                | RootProfile::J714G17S26C5035 => COMMON26_MAIN_SECONDARY_KIND,
             });
             if let Some(layout) = profile.m5_layout() {
 
@@ -1513,7 +1525,8 @@ pub(crate) const COMMON26_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
     band(0x5cc, 0x628, 0x18, Evidence::ProducerChecked),
 ];
 
-/// Status config 26A428 -> 26B123 (macOS 27.2), in 26A428 offsets. The status config grows from 0x780 to 0x790 bytes (allocation size table entry 13).
+/// Status config 26A428 -> 26B123 (macOS 27.2; 27.3 beta 1 is assumed to have the same layout),
+/// in 26A428 offsets. The status config grows from 0x780 to 0x790 bytes (allocation size table entry 13).
 ///
 /// From +0x5b4 the object holds two controller blocks, at +0x5b4 and +0x610, of 0x5c bytes
 /// each. 26B123 inserts two words into each block, an override slot at block +0x28 and its
@@ -1524,7 +1537,8 @@ pub(crate) const COMMON26_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
 /// InitData captured from macOS 27.2 on a J716s shows the link pointer at 0x788 (the word at
 /// 0x778, where 26A428 keeps it, is null) and the link word 1 at 0x784. The capture does not
 /// separate a block of 0x64 bytes from one of 0x5c, so where inside the two blocks the 0x10 bytes
-/// sit, and the history offsets that follow from the same shift, are not confirmed.
+/// sit, and the history offsets that follow from the same shift, are not confirmed. Nothing has
+/// been captured under 27.3.
 pub(crate) const M5_26B123_STATUS_CONFIG_BANDS: &[LayoutBand] = &[
     band(0x000, 0x5dc, 0, Evidence::Inferred),
     band(0x5dc, 0x608, 0x4, Evidence::Inferred),
@@ -1785,8 +1799,9 @@ pub(crate) const M5_CONTROL_OPENING_OPCODE_SECONDARY: u32 =
 
 pub(crate) const M5_INITDATA_VERSION_WORD: u64 = 0x0c8e_0339_8728_04c0;
 
-/// The interface version word, at root+0, of the 27.2 (26B123) M5 firmware: the 26A428 word with
-/// bit 46 set. Both roots of InitData captured from macOS 27.2 on a J716s carry it.
+/// The interface version word, at root+0, of the 27.2 (26B123) and 27.3 beta 1 (26C5035r) M5
+/// firmware: the 26A428 word with bit 46 set. Both roots of InitData captured from macOS 27.2 on
+/// a J716s carry it; 27.3 has not been captured.
 pub(crate) const M5_26B123_INITDATA_VERSION_WORD: u64 = 0x0c8e_4339_8728_04c0;
 
 pub(crate) const M5_ROOT_SIZE: usize = 0xc8;
@@ -1796,11 +1811,11 @@ pub(crate) const ABI_ALLOCATION_SIZES_26A428_M5: [usize; 24] = [
     0xe730, 0x0780, 0x0020, 0x01b0, 0x4800, 0x28800, 0x79800, 0x9000, 0x00a8, 0x0008, 0x1ca0, 0x00e4,
 ];
 
-/// The allocation size table of the 27.2 (26B123) M5 firmware, indexed like
-/// [`ABI_ALLOCATION_SIZES_26A428_M5`]. Only two entries differ from it: the power policy (index 4,
-/// 0x126b0 -> 0x12728) and the status config (index 13, 0x780 -> 0x790). In InitData captured from
-/// macOS 27.2 on a J716s, the spacing of all eight objects whose distance depends on these two
-/// sizes matches this table and none matches 26A428's.
+/// The allocation size table of the 27.2 (26B123) and 27.3 beta 1 (26C5035r) M5 firmware, indexed
+/// like [`ABI_ALLOCATION_SIZES_26A428_M5`]. Only two entries differ from it: the power policy
+/// (index 4, 0x126b0 -> 0x12728) and the status config (index 13, 0x780 -> 0x790). In InitData
+/// captured from macOS 27.2 on a J716s, the spacing of all eight objects whose distance depends on
+/// these two sizes matches this table and none matches 26A428's; 27.3 has not been captured.
 pub(crate) const ABI_ALLOCATION_SIZES_26B123_M5: [usize; 24] = [
     0x2850, 0x0c18, 0x1048, 0x0e10, 0x12728, 0x0068, 0x0800, 0x0088, 0x1800, 0x04c0, 0x4000,
     0x0030, 0xe730, 0x0790, 0x0020, 0x01b0, 0x4800, 0x28800, 0x79800, 0x9000, 0x00a8, 0x0008,
@@ -1816,8 +1831,31 @@ const _: () = {
     }
 };
 
-/// The InitData layout of one M5 firmware build: its allocation size table and the packed
-/// clusters derived from it.
+/// The HW data of the 27.3 beta 1 firmware (26C5035r) is 26A428's with one u32 inserted at 0x2720
+/// ([`M5_26C5035_HW_FORCED_IDLE_TIMEOUT`]): every later field moves by 4 (the kick-shared pointer
+/// from 0x27dc to 0x27e0, the last moved word from 0x2846 to 0x284a), and the four zero bytes past
+/// 0x284c fall off the end. The layout is not yet confirmed from captured InitData.
+pub(crate) const M5_26C5035_HW_DATA_BANDS: &[LayoutBand] = &[
+    band(0x0000, 0x2720, 0, Evidence::Inferred),
+    band(0x2720, 0x284c, 4, Evidence::Inferred),
+];
+
+/// The 26C5035r HW data word for the time the GPU may take to reach a forced idle after a sleep
+/// request, ms; 0 disables the wait. 26A428 and 26B123 HW data have no such word. Its meaning and
+/// the value written to it are not yet confirmed from captured InitData.
+pub(crate) const M5_26C5035_HW_FORCED_IDLE_TIMEOUT: usize = 0x2720;
+
+/// The forced-idle wait written to the HW data, in seconds (5000 ms). The value is not yet
+/// confirmed from captured InitData.
+pub(crate) const M5_GPU_TIMEOUT_SECONDS: u32 = 5;
+
+/// The forced-idle word for a wait of `seconds`: seconds x 1000 ms, saturating to u32::MAX.
+pub(crate) const fn m5_forced_idle_timeout_ms(seconds: u32) -> u32 {
+    seconds.saturating_mul(1000)
+}
+
+/// The InitData layout of one M5 firmware build: its allocation size table, the packed clusters
+/// derived from it, and how its HW data differs from the 26A428 encoding.
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub(crate) struct M5Layout {
     /// The allocation size table.
@@ -1826,15 +1864,29 @@ pub(crate) struct M5Layout {
     pub(crate) shared: SharedClusterLayout,
     /// The private cluster.
     pub(crate) private: PrivateClusterLayout,
+    /// Moves the 26A428 HW data encoding to this build's offsets; empty where they are the same.
+    pub(crate) hw_data_bands: &'static [LayoutBand],
+    /// Words of this build's HW data that have no place in the 26A428 encoding: offset, value.
+    pub(crate) hw_data_words: &'static [(usize, u32)],
 }
 
 impl M5Layout {
-    const fn new(sizes: [usize; 24]) -> Self {
+    const fn new(
+        sizes: [usize; 24],
+        hw_data_bands: &'static [LayoutBand],
+        hw_data_words: &'static [(usize, u32)],
+    ) -> Self {
         Self {
             sizes,
             shared: shared_cluster_layout(&sizes),
             private: private_cluster_layout(&sizes),
+            hw_data_bands,
+            hw_data_words,
         }
+    }
+
+    pub(crate) const fn hw_data_size(&self) -> usize {
+        self.sizes[ALLOC_HW_DATA]
     }
 
     pub(crate) const fn policy_size(&self) -> usize {
@@ -1891,25 +1943,63 @@ impl M5Layout {
     pub(crate) const fn status_b_span(&self) -> usize {
         self.private.roles[0].status_a - self.private.status_b
     }
+
+    /// Where this build's HW data holds the field the 26A428 encoding holds at `offset`.
+    pub(crate) const fn hw_data_offset(&self, offset: usize) -> Option<usize> {
+        if self.hw_data_bands.is_empty() {
+            return Some(offset);
+        }
+        relocate_by_bands(self.hw_data_bands, offset)
+    }
 }
 
 /// The 27.0 (26A428) M5 layout.
-pub(crate) const M5_LAYOUT_26A428: M5Layout = M5Layout::new(ABI_ALLOCATION_SIZES_26A428_M5);
+pub(crate) const M5_LAYOUT_26A428: M5Layout =
+    M5Layout::new(ABI_ALLOCATION_SIZES_26A428_M5, &[], &[]);
 
 /// The 27.2 (26B123) M5 layout.
-pub(crate) const M5_LAYOUT_26B123: M5Layout = M5Layout::new(ABI_ALLOCATION_SIZES_26B123_M5);
+pub(crate) const M5_LAYOUT_26B123: M5Layout =
+    M5Layout::new(ABI_ALLOCATION_SIZES_26B123_M5, &[], &[]);
+
+/// The 27.3 beta 1 (26C5035r) M5 layout.
+pub(crate) const M5_LAYOUT_26C5035: M5Layout = M5Layout::new(
+    ABI_ALLOCATION_SIZES_26B123_M5,
+    M5_26C5035_HW_DATA_BANDS,
+    &[(
+        M5_26C5035_HW_FORCED_IDLE_TIMEOUT,
+        m5_forced_idle_timeout_ms(M5_GPU_TIMEOUT_SECONDS),
+    )],
+);
 
 const _: () = {
     // The bundle and the private cluster keep the sizes of their fixed windows.
     assert!(M5_LAYOUT_26B123.shared.total == M5_LAYOUT_26A428.shared.total);
     assert!(M5_LAYOUT_26B123.private.total == M5_LAYOUT_26A428.private.total);
+    // The kick-shared pointer and the last word the 26C5035r layout moves.
+    let kick = M5_KICK_SHARED_POINTER;
+    assert!(matches!(
+        M5_LAYOUT_26A428.hw_data_offset(kick),
+        Some(0x27dc)
+    ));
+    assert!(matches!(
+        M5_LAYOUT_26C5035.hw_data_offset(kick),
+        Some(0x27e0)
+    ));
+    assert!(matches!(
+        M5_LAYOUT_26C5035.hw_data_offset(0x2846),
+        Some(0x284a)
+    ));
+    assert!(matches!(
+        M5_LAYOUT_26C5035.hw_data_offset(0x271c),
+        Some(0x271c)
+    ));
 };
 
 const _: () = {
     use super::super::variant::M5Layouts;
     // Every M5 build's policy map and status-config map fill the allocations of its size table,
     // and the policy starts where the encoders write its 26A428 form.
-    let builds = [M5Layouts::V26A428, M5Layouts::V26B123];
+    let builds = [M5Layouts::V26A428, M5Layouts::V26B123, M5Layouts::V26C5035];
     let mut index = 0;
     while index < builds.len() {
         let profile = RootProfile::for_m5_layouts(builds[index]);
@@ -1937,11 +2027,18 @@ pub(crate) const M5_HW_DATA_SIZE: usize = ABI_ALLOCATION_SIZES_26A428_M5[ALLOC_H
 pub(crate) const M5_KICK_SHARED_SIZE: usize = 0x2000;
 pub(crate) const M5_KICK_SHARED_POINTER: usize = 0x27dc;
 
-pub(crate) fn set_m5_kick_shared(board: &Board, out: &mut [u8], address: u64)
-    -> Result<(), InitdataError> {
-    if out.len() != M5_HW_DATA_SIZE {
+pub(crate) fn set_m5_kick_shared_for_layout(
+    layout: &M5Layout,
+    board: &Board,
+    out: &mut [u8],
+    address: u64,
+) -> Result<(), InitdataError> {
+    if out.len() != layout.hw_data_size() {
         return Err(InitdataError::BufferSize);
     }
+    let pointer = layout
+        .hw_data_offset(hw_offset(board, M5_KICK_SHARED_POINTER))
+        .ok_or(InitdataError::BufferSize)?;
     required_address(address)?;
     let end = address.checked_add(M5_KICK_SHARED_SIZE as u64 - 1)
         .ok_or(InitdataError::AddressOutOfRange)?;
@@ -1949,7 +2046,7 @@ pub(crate) fn set_m5_kick_shared(board: &Board, out: &mut [u8], address: u64)
     if address & (UAT_PAGE_SIZE as u64 - 1) != 0 {
         return Err(InitdataError::AddressOutOfRange);
     }
-    put_u64(out, hw_offset(board, M5_KICK_SHARED_POINTER), address);
+    put_u64(out, pointer, address);
     Ok(())
 }
 
@@ -2203,6 +2300,7 @@ pub(crate) const fn m5_graph(layouts: M5Layouts) -> &'static Graph {
     match layouts {
         M5Layouts::V26A428 => &M5_GRAPH,
         M5Layouts::V26B123 => &M5_GRAPH_26B123,
+        M5Layouts::V26C5035 => &M5_GRAPH_26C5035,
     }
 }
 
@@ -2222,6 +2320,8 @@ const fn graph_for_m5_layout(layouts: M5Layouts, layout: &M5Layout) -> Graph {
 
 pub(crate) const M5_GRAPH_26B123: Graph =
     graph_for_m5_layout(M5Layouts::V26B123, &M5_LAYOUT_26B123);
+pub(crate) const M5_GRAPH_26C5035: Graph =
+    graph_for_m5_layout(M5Layouts::V26C5035, &M5_LAYOUT_26C5035);
 
 /// The common 26A428 build (J873's interface; the J813).
 pub(crate) const COMMON26_GRAPH: Graph = Graph {
@@ -2893,16 +2993,24 @@ const _: () = {
 
 /// Populate the enabled-USC count from the device's sampled core masks.
 /// This count covers the whole device, not one cluster.
-pub(crate) fn set_m5_enabled_cores(board: &Board, out: &mut [u8], enabled: u32)
-    -> Result<(), InitdataError> {
-    if out.len() != M5_HW_DATA_SIZE {
+pub(crate) fn set_m5_enabled_cores_for_layout(
+    layout: &M5Layout,
+    board: &Board,
+    out: &mut [u8],
+    enabled: u32,
+) -> Result<(), InitdataError> {
+    if out.len() != layout.hw_data_size() {
         return Err(InitdataError::BufferSize);
     }
     if enabled == 0 || enabled > 128 {
         return Err(InitdataError::InterfaceMismatch);
     }
-    put_u32(out, 0x10a4, enabled);
-    put_u32(out, hw_offset(board, 0x268c), enabled);
+    for offset in [0x10a4, 0x268c] {
+        let offset = layout
+            .hw_data_offset(hw_offset(board, offset))
+            .ok_or(InitdataError::BufferSize)?;
+        put_u32(out, offset, enabled);
+    }
     Ok(())
 }
 
@@ -2910,7 +3018,8 @@ pub(crate) const M5_POLICY_STATE_PTR: usize = 0x8254;
 
 pub(crate) const M5_POLICY_AON_PTD_PTR: usize = 0x11a1c;
 
-/// Power policy 26A428 -> 26B123 (macOS 27.2), in 26A428 offsets. The policy grows from 0x126b0 to 0x12728 bytes (allocation size table entry 4); five
+/// Power policy 26A428 -> 26B123 (macOS 27.2; 27.3 beta 1 is assumed to have the same layout), in
+/// 26A428 offsets. The policy grows from 0x126b0 to 0x12728 bytes (allocation size table entry 4); five
 /// inserts move the words above them:
 ///
 /// - +0x4910, 0x10 bytes (two u64 words). The three controller input words at 0x4910..0x4918
@@ -3023,7 +3132,7 @@ pub(crate) const M5_26B123_POLICY: M5PolicyMap = M5PolicyMap {
     controller_words: M5_26B123_POLICY_CONTROLLER_WORDS,
 };
 
-/// The power-policy map of an M5 firmware build.
+/// The power-policy map of an M5 firmware build. 27.2 (26B123) and 27.3 (26C5035r) share one.
 pub(crate) const fn m5_policy(layouts: M5Layouts) -> &'static M5PolicyMap {
     match layouts {
         M5Layouts::V26A428 => &M5_26A428_POLICY,
@@ -3552,14 +3661,15 @@ pub(crate) fn encode_m5_register_map(
     Ok(())
 }
 
-pub(crate) fn encode_m5_hw_data(
+pub(crate) fn encode_m5_hw_data_for_layout(
+    layout: &M5Layout,
     board: &Board,
     aliases: [G17PKsmCompletionAliases; M5_25G76_COMPLETION_QUEUE_COUNT],
     qos_high: u64,
     windows: &[M5RegisterWindow],
     out: &mut [u8],
 ) -> Result<(), InitdataError> {
-    if out.len() != M5_HW_DATA_SIZE {
+    if out.len() != M5_HW_DATA_SIZE || out.len() != layout.hw_data_size() {
         return Err(InitdataError::BufferSize);
     }
     required_address(qos_high)?;
@@ -3657,6 +3767,49 @@ pub(crate) fn encode_m5_hw_data(
     }
     // The inherited J813 minimum parameter-buffer size is replaced per board.
     put_u32(out, hw_offset(board, 0x26b0), board.min_parameter_buffer);
+    // Then the build's own HW data, which only adds to the 26A428 one.
+    relocate_hw_data(layout.hw_data_bands, out)?;
+    for &(offset, value) in layout.hw_data_words {
+        if offset + 4 > out.len() {
+            return Err(InitdataError::BufferSize);
+        }
+        put_u32(out, offset, value);
+    }
+    Ok(())
+}
+
+/// Moves an HW data encoding by `bands`, which are in ascending order and move their bytes up by
+/// non-negative deltas, none smaller than the band before it. The bytes no band moves anything to
+/// are cleared; the bytes past the last band have to be zero, as the move drops them.
+fn relocate_hw_data(bands: &[LayoutBand], out: &mut [u8]) -> Result<(), InitdataError> {
+    let Some(last) = bands.last() else {
+        return Ok(());
+    };
+    let dropped = out.get(last.end..).ok_or(InitdataError::BufferSize)?;
+    if dropped.iter().any(|byte| *byte != 0) {
+        return Err(InitdataError::BufferSize);
+    }
+    let mut floor = (0, 0);
+    for band in bands {
+        let delta = usize::try_from(band.delta).map_err(|_| InitdataError::BufferSize)?;
+        if band.start < floor.0 || band.end < band.start || delta < floor.1 {
+            return Err(InitdataError::BufferSize);
+        }
+        if band.end + delta > out.len() {
+            return Err(InitdataError::BufferSize);
+        }
+        floor = (band.end, delta);
+    }
+    for band in bands.iter().rev() {
+        out.copy_within(band.start..band.end, band.start + band.delta as usize);
+    }
+    let mut moved = 0;
+    for band in bands {
+        let start = band.start + band.delta as usize;
+        out[moved..start].fill(0);
+        moved = band.end + band.delta as usize;
+    }
+    out[moved..].fill(0);
     Ok(())
 }
 

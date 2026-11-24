@@ -45,10 +45,37 @@ pub(crate) const CONFIG: Config = Config {
     gpu_generation: GpuGen::G17,
     // The firmware in `fw-text` must be one of these builds. iBoot loads the G17S build of both
     // roles back to back: the primary's text at 0x50000 of `fw-text`, then the secondary's at
-    // 0x54000, with the same entropy records and boot-filled ranges as the M5 Max (27.2 moves the
-    // primary's records by a few bytes). Each digest is that of the firmware's text with
+    // 0x54000, with the same entropy records and boot-filled ranges as the M5 Max (27.2 and 27.3
+    // move the primary's records by a few bytes). Each digest is that of the firmware's text with
     // those ranges zeroed, a loaded copy normalizing to it on every boot. Newest first.
     firmware: crate::g17::fw::variant::Firmware::Identified(&[
+        crate::g17::fw::variant::Build {
+            os_version: [27, 3, 0],
+            name: "27.3 (26C5035r), G17S",
+            images: &[crate::fwid::FirmwareBuild {
+                name: "26C5035r for T6050 G17S, primary then secondary",
+                text_size: 0xa4000,
+                data_size: 0x184000,
+                entropy: &[[0x49eac, 0x49f8f], [0x9d92c, 0x9da0f]],
+                boot_filled: &[
+                    (0x224, 4),
+                    (0x23c, 8),
+                    (0x4976c, 0x740),
+                    (0x49eac, 0x231),
+                    (0x50224, 4),
+                    (0x5023c, 8),
+                    (0x9d1ec, 0x740),
+                    (0x9d92c, 0x231),
+                ],
+                text_sha256: [
+                    0xb5, 0x53, 0x7c, 0x8f, 0x06, 0xbd, 0x19, 0xeb, 0xf0, 0xef, 0xd0, 0xcb, 0xfb,
+                    0x65, 0x52, 0x33, 0x9a, 0x10, 0xd4, 0xaf, 0xc4, 0xed, 0xa9, 0xd2, 0x1c, 0xbe,
+                    0xdc, 0x36, 0x66, 0x76, 0x36, 0x00,
+                ],
+            }],
+            variant: &crate::g17::fw::variant::V26C5035_M5,
+            config: None,
+        },
         crate::g17::fw::variant::Build {
             os_version: [27, 2, 0],
             name: "27.2 (26B123), G17S",
